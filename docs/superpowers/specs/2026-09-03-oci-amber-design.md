@@ -631,3 +631,41 @@ and source; oci-amber then requires that version.
 - **tar-prism**: memory sink/source round trips over every existing fixture,
   the short-consumption error, and the short/long blob errors in
   `ComposeFrom`.
+
+## Implementation notes
+
+The implementation deviates from the text above in five places. Each is
+deliberate, consistent across the code base, and pinned by
+`registry/e2e_test.go` (`TestE2EPushPull`).
+
+1. **Invalid tag on manifest push.** "Manifest push" step 1 names
+   `400 TAG_INVALID`; that code is not in the standard list under "HTTP
+   surface", so the registry answers `400 MANIFEST_INVALID` with a message
+   starting `invalid tag`. On `GET`, `HEAD` and `DELETE` a malformed tag is
+   `404 MANIFEST_UNKNOWN`.
+2. **Upload session ownership.** "Finalization removes the session from the
+   map" happens only after `blob.Store.Put` succeeds. On an internal failure
+   (`500`) the session and its spool stay registered with every byte
+   received, as the error-handling table requires, so the client can retry
+   the `PUT`; `GET` on the session keeps answering `204` with the full
+   `Range`. A digest mismatch discards the session, since its bytes can never
+   become valid. A monolithic `POST ?digest=` session is discarded on every
+   failure because the client never learns its id.
+3. **`rawReason` in blob `meta.json`.** The key is omitted for prisms
+   (`omitempty`) rather than written as `""`; raw blobs always carry it.
+   Likewise `diffId`, `uncompressedSize`, `entries`, `engine` and
+   `engineVersion` are absent for raw blobs rather than zero-valued, and
+   `engine`/`engineVersion` are absent for an uncompressed prism
+   (`format: "none"`), which has no compressor to name.
+4. **Blob root write.** The blob root and `meta.json` go through a second
+   accounting writer (`packstore.WriteParallel` with `Verify`, one extra
+   fsync) whose stats are discarded, not through a separate `WriteBatch`.
+   The observable contract is unchanged: the stats in `meta.json` and in the
+   blob log line cover exactly the ingest objects, never the root or
+   `meta.json`. The image root and its `meta.json` are written the same way.
+5. **Log line keys.** The blob line carries `raw_reason=` and `duration=`
+   for raw blobs and `engine=`, `entries=` and `duration=` for prisms; the
+   image line carries `manifests=` and `duration=` in addition to the keys
+   listed under "Accounting and logging". An identical manifest re-push logs
+   again with `disk_bytes=0` and `compression_ratio=+Inf`. Internal failures
+   log `request failed` at Error level. The README shows the real shape.

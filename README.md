@@ -126,29 +126,53 @@ Range requests on prism-stored layers are answered with the full body.
 
 ## Logging
 
-Logs are `log/slog` text lines on stderr. Two lines matter operationally.
+Logs are `log/slog` text lines on stderr; `--log-level` selects the
+threshold. Two Info lines carry the accounting.
 
-After every blob finalization (Info):
-
-```
-blob stored digest=sha256:… size=… kind=prism format=gzip engine=gnu-gzip entries=… logical_bytes=… deduped_bytes=… disk_bytes=… duration=…
-```
-
-`kind` is `prism` or `raw` (with `raw_reason`), `logical_bytes` is the size
-of every object offered to the store, `deduped_bytes` the part that already
-existed, `disk_bytes` what was actually appended to pack segments.
-
-After every manifest push (Info):
+After every blob finalization, one line per blob:
 
 ```
-image pushed repo=library/app reference=v1 digest=sha256:… kind=manifest blobs=7 manifests=0 total_bytes=95631872 logical_bytes=327545651 deduped_bytes=293700000 deduped_percent=89.7 disk_bytes=10276044 compression_ratio=9.31 duration=…
+time=2026-09-03T18:00:01.412+02:00 level=INFO msg="blob stored" digest=sha256:4f7c… size=31457280 kind=prism format=gzip engine=go-flate entries=1834 logical_bytes=98304211 deduped_bytes=91250688 disk_bytes=2611200 duration=1.842s
+time=2026-09-03T18:00:01.420+02:00 level=INFO msg="blob stored" digest=sha256:9b2e… size=1523 kind=raw format=none raw_reason=not-tar logical_bytes=1523 deduped_bytes=0 disk_bytes=1560 duration=3.1ms
 ```
 
-`total_bytes` is the image size as the manifest describes it,
-`compression_ratio` is `total_bytes / disk_bytes` and `deduped_percent` is
+`kind` is `prism` (file contents plus recipes; `engine` names the compressor
+that reproduces the layer and `entries` counts its regular files) or `raw`
+(verbatim bytes; `raw_reason` is one of `not-reproducible`, `unsupported`,
+`corrupt`, `not-tar`, `analyze-timeout`, `roundtrip-failed`,
+`decompose-failed`). An uncompressed tar is a prism with `format=none` and an
+empty `engine`: there is no compressor whose output has to be reproduced. A
+prism line never carries `raw_reason`; a raw line never carries `engine` or
+`entries`. `logical_bytes` is the encoded size of every object offered to the
+store, `deduped_bytes` the part that already existed, and `disk_bytes` what
+was actually appended to pack segments; the blob root and its `meta.json` are
+not counted. A blob that is uploaded again is not re-ingested and counts as
+fully deduplicated.
+
+After every manifest or index push, one line per image (an identical
+re-push logs again, with `disk_bytes=0` and `compression_ratio=+Inf`):
+
+```
+time=2026-09-03T18:00:02.007+02:00 level=INFO msg="image pushed" repo=library/app reference=v1 digest=sha256:c81d… kind=manifest blobs=3 manifests=0 total_bytes=95631872 logical_bytes=327545651 deduped_bytes=293700000 deduped_percent=89.7 disk_bytes=10276044 compression_ratio=9.31 duration=18.6ms
+time=2026-09-03T18:00:02.311+02:00 level=INFO msg="image pushed" repo=library/app reference=latest digest=sha256:e07a… kind=index blobs=0 manifests=2 total_bytes=191267209 logical_bytes=655091302 deduped_bytes=620841219 deduped_percent=94.8 disk_bytes=10280120 compression_ratio=18.61 duration=4.2ms
+```
+
+`total_bytes` is the image size as the manifest describes it (config, layers
+and the manifest bytes; for an index, the index bytes plus every child's
+total). `blobs` and `manifests` count the descriptors that were resolved. The
+byte counters add up the blobs uploaded for this image (blobs that were
+already present count as fully deduplicated) and the manifest's own objects.
+`compression_ratio` is `total_bytes / disk_bytes` (`+Inf` when nothing new
+reached the disk) and `deduped_percent` is
 `100 * deduped_bytes / logical_bytes`. The same numbers are stored in the
-image's `meta.json`. A pull-side reproduction failure (compressor drift after
-an upgrade) is logged at Error level with the digest.
+image's `meta.json`.
+
+Internal failures answer `500` with `{"errors":[]}` and log
+`msg="request failed"` at Error level with `method`, `path` and `error`; a
+blob upload that fails this way keeps its session so the client can retry
+the `PUT`. A pull-side reproduction failure (compressor drift after an
+upgrade) is logged at Error level with the digest, and the connection is cut
+so the client sees a truncated body rather than wrong bytes.
 
 ## Garbage collection
 
@@ -177,8 +201,15 @@ nix develop --command go vet ./...
 nix develop --command go build ./cmd/oci-amber   # the binary, with the cgo engines
 ```
 
-The crane smoke test in `cmd/oci-amber` runs only when `crane` is on `PATH`
-(it is, inside the dev shell). Tests never need the network.
+`registry/e2e_test.go` pushes a two-image index, an artifact and a second
+repository through the HTTP API the way docker, podman, containerd and crane
+do it (including a `PUT` that fails with `500` and is retried), checks how
+every blob was stored, pulls everything back byte for byte and checks the
+log lines above. The crane smoke test in `cmd/oci-amber` runs only when
+`crane` is on `PATH` (it is, inside the dev shell): it starts the real server
+wiring, runs `crane push`, `pull`, `validate`, `append`, `ls`, `catalog` and
+`delete` against it, restarts it on the same store and pulls again. Tests
+never need the network.
 
 The design document lives in `docs/superpowers/specs/2026-09-03-oci-amber-design.md`.
 
