@@ -37,9 +37,12 @@ func (bl *Blob) WriteTo(ctx context.Context, w io.Writer) error {
 	case KindRaw:
 		err = bl.store.writeRaw(out, bl.root)
 	case KindPrism:
-		// Task 8: read comp.json into Params and call
-		// bl.store.writePrism(ctx, out, bl.root, params).
-		err = errPrismUnavailable
+		params, perr := bl.store.readParams(bl.root)
+		if perr != nil {
+			err = perr
+		} else {
+			err = bl.store.writePrism(ctx, out, bl.root, params)
+		}
 	default:
 		err = fmt.Errorf("blob: %s has unknown kind %q", bl.Meta.Digest, bl.Meta.Kind)
 	}

@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	tarprism "github.com/draganm/tar-prism"
 	"github.com/jobs-build/amber-store-core/key"
 
 	"github.com/draganm/oci-amber/oci"
@@ -26,11 +27,6 @@ var (
 	// blob's digest. They have already been written; the caller must abort
 	// the response rather than finish it.
 	ErrDigestMismatch = errors.New("blob: served bytes do not match digest")
-
-	// errPrismUnavailable is returned by the prism arms of Put and
-	// Blob.WriteTo until Task 8 (blob/prism.go) fills them in. Nothing in
-	// this task stores a prism, so only a hand-built root reaches it.
-	errPrismUnavailable = errors.New("blob: prism path not implemented yet")
 )
 
 // blobsDirName is the prism blobs directory inside a blob root; it equals
@@ -284,13 +280,13 @@ func (k *keyedMutex) lock(d oci.Digest) func() {
 	}
 }
 
-// Put finalizes an upload (spec "Blob finalization" steps 2-9 for raw
-// blobs): whole-blob dedup, finalize slot, analyze and classify, raw ingest
-// through the accounting writer, blob root, oci/blob/<digest> ref,
-// recent-uploads entry, log line, spool removal. A prism candidate is
-// rejected with errPrismUnavailable until Task 8 wires pass two in. On any
-// error nothing is published and the spool is left in place so the caller
-// can keep the session for a retry; on success the spool's backing file is
+// Put finalizes an upload (spec "Blob finalization" steps 2-9): whole-blob
+// dedup, finalize slot, analyze and classify, prism or raw ingest through
+// the accounting writer, blob root, oci/blob/<digest> ref, recent-uploads
+// entry, log line, spool removal. A prism whose pass two or round-trip
+// check fails is downgraded to raw with the recorded reason. On any error
+// nothing is published and the spool is left in place so the caller can
+// keep the session for a retry; on success the spool's backing file is
 // removed.
 func (b *Store) Put(ctx context.Context, sp *upload.Spool) (*Meta, error) {
 	if sp == nil {
@@ -343,20 +339,50 @@ func (b *Store) Put(ctx context.Context, sp *upload.Spool) (*Meta, error) {
 		Format:     dec.format,
 		UploadedAt: time.Now().UTC(),
 	}
+	kind, reason := dec.kind, dec.reason
 	var root key.Key
-	switch dec.kind {
-	case KindRaw:
-		// Step 7: raw path.
-		root, meta, err = b.finalizeRaw(ctx, sp, meta, dec.reason)
+	switch kind {
 	case KindPrism:
-		// Task 8: ingestPrism, second-pass verification, the round-trip
-		// check, and the decompose-failed / roundtrip-failed downgrades.
-		err = errPrismUnavailable
+		if dec.params == nil {
+			return nil, errors.New("blob: prism decision without params")
+		}
+		// Steps 6 and 8: pass two and the round-trip check.
+		res, stats, perr := b.finalizePrism(ctx, sp, dec.params, d)
+		var fb *rawFallback
+		switch {
+		case perr == nil:
+			meta.Kind = KindPrism
+			meta.DiffID = res.diffID
+			meta.UncompressedSize = res.uncompressedSize
+			meta.Entries = res.entries
+			meta.Engine = dec.params.Engine
+			meta.EngineVersion = dec.params.EngineVersion
+			meta.Stats = stats
+			root, err = b.writeRoot(ctx, meta, map[string]key.Key{
+				tarprism.RecipeFile: res.recipe,
+				tarprism.IndexFile:  res.index,
+				CompFile:            res.comp,
+			}, res.blobs)
+			if err != nil {
+				return nil, err
+			}
+		case errors.As(perr, &fb):
+			// Downgrade: the prism objects are left to GC and the verbatim
+			// bytes are stored below with the fallback reason.
+			kind, reason = KindRaw, fb.reason
+		default:
+			return nil, perr
+		}
+	case KindRaw:
 	default:
-		err = fmt.Errorf("blob: unknown kind %q", dec.kind)
+		return nil, fmt.Errorf("blob: unknown kind %q", kind)
 	}
-	if err != nil {
-		return nil, err
+	if kind == KindRaw {
+		// Step 7: raw path, also the target of a prism downgrade.
+		root, meta, err = b.finalizeRaw(ctx, sp, meta, reason)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	// Step 9: publish, record, log, discard the spool.

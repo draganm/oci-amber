@@ -345,23 +345,6 @@ func TestPutCancelledContext(t *testing.T) {
 	}
 }
 
-func TestPutPrismCandidateNotYetWired(t *testing.T) {
-	// Task 8 deletes this test when it wires ingestPrism into Put.
-	b, _, _ := newTestStore(t, Options{})
-	data := tarBytes(t, "etc/motd", textBytes(3000, 5))
-	sp := spoolOf(data)
-	_, err := b.Put(context.Background(), sp)
-	if !errors.Is(err, errPrismUnavailable) {
-		t.Fatalf("Put of a prism candidate = %v, want errPrismUnavailable", err)
-	}
-	if ok, _ := b.Exists(oci.DigestOfBytes(data)); ok {
-		t.Fatal("nothing may be published when ingest fails")
-	}
-	if _, err := sp.Open(); err != nil {
-		t.Fatalf("spool discarded after a failed Put: %v", err)
-	}
-}
-
 func TestPutConcurrentSameDigest(t *testing.T) {
 	b, _, _ := newTestStore(t, Options{MaxConcurrentFinalize: 4})
 	data := textBytes(40000, 21)

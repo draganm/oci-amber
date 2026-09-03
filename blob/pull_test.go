@@ -2,6 +2,7 @@ package blob
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"errors"
 	"testing"
@@ -130,14 +131,17 @@ func TestWriteRangeValidation(t *testing.T) {
 	}
 }
 
-func TestPrismPlaceholders(t *testing.T) {
-	// Task 8 rewrites this test around a real prism.
-	b, st, _ := newTestStore(t, Options{})
-	data := []byte("pretend prism")
-	meta := rawMeta(data)
-	meta.Kind, meta.RawReason, meta.Format = KindPrism, "", "gzip"
-	putRawRoot(t, b, st, data, meta)
-	bl, err := b.Open(meta.Digest)
+func TestPrismRangeUnsupported(t *testing.T) {
+	b, _, _ := newTestStore(t, Options{VerifyRoundTrip: true})
+	data := gzipBytes(t, tarBytes(t, "etc/motd", textBytes(3000, 5)), gzip.DefaultCompression)
+	m, err := b.Put(context.Background(), spoolOf(data))
+	if err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	if m.Kind != KindPrism {
+		t.Fatalf("kind = %q (reason %q), want prism", m.Kind, m.RawReason)
+	}
+	bl, err := b.Open(m.Digest)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -148,11 +152,11 @@ func TestPrismPlaceholders(t *testing.T) {
 	if err := bl.WriteRange(context.Background(), &buf, 0, 1); err == nil {
 		t.Fatal("WriteRange on a prism must fail")
 	}
-	if err := bl.WriteTo(context.Background(), &buf); !errors.Is(err, errPrismUnavailable) {
-		t.Fatalf("WriteTo on prism = %v, want errPrismUnavailable", err)
-	}
 	if buf.Len() != 0 {
-		t.Fatalf("%d bytes written for a prism placeholder", buf.Len())
+		t.Fatalf("WriteRange wrote %d bytes before refusing", buf.Len())
+	}
+	if got := pullAll(t, bl); !bytes.Equal(got, data) {
+		t.Fatal("WriteTo on prism differs from the pushed bytes")
 	}
 }
 
