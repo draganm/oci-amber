@@ -159,13 +159,15 @@ func (m *Manager) Remove(id string) error {
 }
 
 // Sweep removes every session whose last activity is more than the timeout
-// before now, together with its file, and returns how many it removed.
+// before now, together with its file, and returns how many it removed. A
+// session's file is always removed before the session is forgotten (dropped
+// from the map), so once a caller observes a session gone from the map, its
+// file is already gone too.
 func (m *Manager) Sweep(now time.Time) int {
 	m.mu.Lock()
 	var expired []*Session
-	for id, s := range m.sessions {
+	for _, s := range m.sessions {
 		if now.Sub(s.active()) > m.timeout {
-			delete(m.sessions, id)
 			expired = append(expired, s)
 		}
 	}
@@ -177,12 +179,18 @@ func (m *Manager) Sweep(now time.Time) int {
 			continue
 		}
 		m.log.Info("upload session expired", "id", s.ID, "size", size)
+		m.mu.Lock()
+		if m.sessions[s.ID] == s {
+			delete(m.sessions, s.ID)
+		}
+		m.mu.Unlock()
 	}
 	return len(expired)
 }
 
-// Close stops the sweeper and removes every session and its file. Create
-// fails afterwards. Close is idempotent.
+// Close stops the sweeper and removes every session and its file, closing
+// each file before forgetting its session, same as Sweep. Create fails
+// afterwards. Close is idempotent.
 func (m *Manager) Close() error {
 	m.mu.Lock()
 	if m.closed {
@@ -190,8 +198,10 @@ func (m *Manager) Close() error {
 		return nil
 	}
 	m.closed = true
-	sessions := m.sessions
-	m.sessions = map[string]*Session{}
+	sessions := make([]*Session, 0, len(m.sessions))
+	for _, s := range m.sessions {
+		sessions = append(sessions, s)
+	}
 	m.mu.Unlock()
 	close(m.stop)
 	<-m.done
@@ -200,6 +210,11 @@ func (m *Manager) Close() error {
 		if err := s.close(); err != nil {
 			errs = append(errs, err)
 		}
+		m.mu.Lock()
+		if m.sessions[s.ID] == s {
+			delete(m.sessions, s.ID)
+		}
+		m.mu.Unlock()
 	}
 	return errors.Join(errs...)
 }

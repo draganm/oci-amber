@@ -283,6 +283,52 @@ func TestBackgroundSweeper(t *testing.T) {
 	}
 }
 
+// TestSweepRemovesFileBeforeForgettingSession is a regression test for the
+// invariant Sweep must uphold: a session's file is removed before the
+// session is forgotten (dropped from the map). It runs Sweep concurrently
+// with tight polling of sessionCount and would have caught the earlier bug,
+// where the map entry was deleted before the file was removed, leaving a
+// window in which sessionCount was already 0 while the file was still on
+// disk.
+func TestSweepRemovesFileBeforeForgettingSession(t *testing.T) {
+	// A long timeout keeps the background sweeper from also racing to
+	// expire the session; only the explicit Sweep call below should do it.
+	m, dir := newTestManager(t, 16, time.Hour)
+	s, err := m.Create()
+	if err != nil {
+		t.Fatal(err)
+	}
+	appendBytes(t, s, pattern(100, 1))
+	setLastActive(s, time.Now().Add(-2*time.Hour))
+
+	done := make(chan int, 1)
+	go func() { done <- m.Sweep(time.Now()) }()
+
+	sweptN := -1
+poll:
+	for i := 0; i < 500; i++ {
+		if sessionCount(m) == 0 {
+			if names := dirNames(t, dir); len(names) != 0 {
+				t.Fatalf("session gone from map while its file is still present: %v", names)
+			}
+		}
+		select {
+		case sweptN = <-done:
+			break poll
+		default:
+		}
+	}
+	if sweptN == -1 {
+		sweptN = <-done
+	}
+	if sweptN != 1 {
+		t.Fatalf("Sweep removed %d sessions, want 1", sweptN)
+	}
+	if names := dirNames(t, dir); len(names) != 0 {
+		t.Fatalf("file left behind after Sweep completed: %v", names)
+	}
+}
+
 func TestManagerCloseRemovesAll(t *testing.T) {
 	m, dir := newTestManager(t, 16, time.Hour)
 	spilled, err := m.Create()
