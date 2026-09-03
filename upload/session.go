@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/draganm/oci-amber/oci"
@@ -33,37 +34,50 @@ type Session struct {
 	path        string
 	maxInMemory int64
 
-	mu         sync.Mutex
-	buf        bytes.Buffer
-	file       *os.File
-	size       int64
-	hash       hash.Hash
-	lastActive time.Time
-	closed     bool
+	mu     sync.Mutex
+	buf    bytes.Buffer
+	file   *os.File
+	size   int64
+	hash   hash.Hash
+	closed bool
+
+	// lastActive holds a UnixNano timestamp, updated by touch and read by
+	// active without taking mu. Append can hold mu for the whole duration
+	// of a large request body copy, so Manager.Sweep must never need mu to
+	// find out whether a session is idle.
+	lastActive atomic.Int64
 }
 
 func newSession(id, path string, maxInMemory int64, now time.Time) *Session {
-	return &Session{
+	s := &Session{
 		ID:          id,
 		path:        path,
 		maxInMemory: maxInMemory,
 		hash:        sha256.New(),
-		lastActive:  now,
 	}
+	s.lastActive.Store(now.UnixNano())
+	return s
 }
 
 // Append reads r until EOF, appends its bytes to the session and returns the
 // new total byte count. When r fails part way the bytes read before the
 // failure stay in the session and the returned offset counts them. On a
 // removed session it returns ErrUnknown.
+//
+// last-active is touched both on entry and again right before Append
+// returns, so a slow request body (one that takes longer than the idle
+// timeout to arrive) is not swept the instant it finishes: the sweeper only
+// ever sees a fresh timestamp once the copy is done.
 func (s *Session) Append(r io.Reader) (int64, error) {
+	s.touch()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.lastActive = time.Now()
 	if s.closed {
+		s.touch()
 		return s.size, ErrUnknown
 	}
 	_, err := io.Copy(sessionWriter{s}, r)
+	s.touch()
 	return s.size, err
 }
 
@@ -81,9 +95,9 @@ func (s *Session) Offset() int64 {
 // session's buffer, which is only ever appended to, so later appends do not
 // change what the spool reads. On a removed session it returns ErrUnknown.
 func (s *Session) Spool() (*Spool, error) {
+	s.touch()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.lastActive = time.Now()
 	if s.closed {
 		return nil, ErrUnknown
 	}
@@ -143,22 +157,26 @@ func (s *Session) spill() error {
 	return nil
 }
 
-// touch records activity on the session.
+// touch records activity on the session. It does not take mu, so it never
+// blocks behind an in-progress Append (which holds mu for the duration of
+// its copy) and never contributes to lock inversion with Manager.Sweep.
 func (s *Session) touch() {
-	s.mu.Lock()
-	s.lastActive = time.Now()
-	s.mu.Unlock()
+	s.lastActive.Store(time.Now().UnixNano())
 }
 
-// active returns the time of the last activity on the session.
+// active returns the time of the last activity on the session. Like touch,
+// it does not take mu: Manager.Sweep calls this while holding the manager's
+// own mutex, and it must never also wait on a session's mutex that a
+// concurrent Append might be holding for a long request body copy.
 func (s *Session) active() time.Time {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.lastActive
+	return time.Unix(0, s.lastActive.Load())
 }
 
 // close releases the buffer, closes and deletes the file and marks the
-// session removed. It is idempotent.
+// session removed. It is idempotent. Unlinking the file here is safe even
+// while a Spool.Open reader for this session is still open elsewhere: on
+// Unix an open file descriptor keeps working after its directory entry is
+// removed (see Spool.Open).
 func (s *Session) close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

@@ -53,6 +53,15 @@ func (sp *Spool) Digest() oci.Digest { return sp.digest }
 // *bytes.Reader; for a file spool it is backed by a freshly opened *os.File
 // and implements io.Closer, which the caller must close. Open may be called
 // several times and the readers' ReadAt may be used concurrently.
+//
+// A file spool's reader stays valid even if its backing path is unlinked
+// after Open returns — by Session.close (a cancel, a finalize, or a sweep)
+// or by a later Spool.Remove on the same path. This registry targets Unix,
+// where an open file descriptor keeps the underlying inode and its data
+// readable until every descriptor referencing it is closed, regardless of
+// whether the directory entry still exists; the reader is unaffected and
+// the space is only reclaimed once this reader (and any other open
+// descriptor for the same file) is closed.
 func (sp *Spool) Open() (ReaderAtSeeker, error) {
 	if sp.removed {
 		return nil, errSpoolRemoved
@@ -73,6 +82,14 @@ func (sp *Spool) Open() (ReaderAtSeeker, error) {
 // Remove deletes the backing file, if any, and drops the reference to the
 // memory buffer. It is idempotent and succeeds when the file is already
 // gone. Open fails after Remove.
+//
+// For a file spool, the backing file is the session's own file (a file
+// spool shares its path with the session that produced it), so Remove
+// deletes it outright. Call Remove only once the session that produced the
+// spool will not be reused: the blob store calls it only after the blob has
+// been stored successfully, never after a failed finalize, since a session
+// kept alive for a retry still needs those bytes. Any reader already
+// obtained from Open before Remove is unaffected — see Open.
 func (sp *Spool) Remove() error {
 	sp.removed = true
 	sp.mem = nil
@@ -86,7 +103,10 @@ func (sp *Spool) Remove() error {
 }
 
 // fileReader restricts an open file to the spool's size so the reader is a
-// true snapshot even if the session's file grows afterwards.
+// true snapshot even if the session's file grows afterwards. It holds its
+// own *os.File, opened fresh in Spool.Open, so it keeps working under
+// Unix's unlink-while-open semantics even after the backing path has been
+// removed from the directory (see Open).
 type fileReader struct {
 	*io.SectionReader
 	f *os.File

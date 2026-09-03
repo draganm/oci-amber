@@ -11,6 +11,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/draganm/oci-amber/oci"
 )
 
 func newTestManager(t *testing.T, maxInMemory int64, timeout time.Duration) (*Manager, string) {
@@ -25,9 +27,7 @@ func newTestManager(t *testing.T, maxInMemory int64, timeout time.Duration) (*Ma
 }
 
 func setLastActive(s *Session, at time.Time) {
-	s.mu.Lock()
-	s.lastActive = at
-	s.mu.Unlock()
+	s.lastActive.Store(at.UnixNano())
 }
 
 // sessionCount reads the registry size without touching any session.
@@ -315,5 +315,148 @@ func TestManagerCloseRemovesAll(t *testing.T) {
 	}
 	if err := m.Close(); err != nil {
 		t.Fatalf("second Close: %v", err)
+	}
+}
+
+// TestSweepDoesNotBlockOnAppend verifies that Manager.Sweep never blocks
+// behind a session's own mutex, which Append can hold for the whole
+// duration of a slow request body copy. Sweep must read last-active
+// without ever taking the session mutex.
+func TestSweepDoesNotBlockOnAppend(t *testing.T) {
+	m, _ := newTestManager(t, 1<<20, time.Hour)
+	s, err := m.Create()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	pr, pw := io.Pipe()
+	appendDone := make(chan error, 1)
+	go func() {
+		_, err := s.Append(pr)
+		appendDone <- err
+	}()
+	// Give the goroutine time to enter Append and block inside io.Copy,
+	// holding the session mutex.
+	time.Sleep(100 * time.Millisecond)
+
+	sweepDone := make(chan int, 1)
+	go func() { sweepDone <- m.Sweep(time.Now()) }()
+	select {
+	case n := <-sweepDone:
+		if n != 0 {
+			t.Fatalf("Sweep removed %d sessions while an Append was in progress", n)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Sweep blocked on the session mutex held by an in-progress Append")
+	}
+
+	if _, err := pw.Write([]byte("payload")); err != nil {
+		t.Fatalf("pipe write: %v", err)
+	}
+	if err := pw.Close(); err != nil {
+		t.Fatalf("pipe close: %v", err)
+	}
+	if err := <-appendDone; err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+}
+
+// slowReader yields its data only after delay has passed, once, then
+// reports EOF. It simulates a request body that takes longer to arrive
+// than the manager's idle timeout.
+type slowReader struct {
+	data  []byte
+	delay time.Duration
+	sent  bool
+}
+
+func (r *slowReader) Read(p []byte) (int, error) {
+	if r.sent {
+		return 0, io.EOF
+	}
+	time.Sleep(r.delay)
+	r.sent = true
+	return copy(p, r.data), nil
+}
+
+// TestAppendRefreshesLastActiveOnExit verifies that Append refreshes
+// last-active again right before it returns, not only on entry. Without
+// that exit touch, a slow Append that outlasts the idle timeout would be
+// swept the instant it completes.
+func TestAppendRefreshesLastActiveOnExit(t *testing.T) {
+	const (
+		sleep   = 150 * time.Millisecond
+		timeout = 50 * time.Millisecond // shorter than sleep, longer than zero
+	)
+	// Built directly (not via NewManager) so no background sweeper races
+	// with the manual Sweep call below during the slow Append.
+	dir := t.TempDir()
+	m := &Manager{
+		dir:         dir,
+		maxInMemory: 1 << 20,
+		timeout:     timeout,
+		log:         slog.New(slog.NewTextHandler(io.Discard, nil)),
+		sessions:    map[string]*Session{},
+	}
+	s := newSession(testID, filepath.Join(dir, testID), m.maxInMemory, time.Now())
+	m.sessions[testID] = s
+
+	if _, err := s.Append(&slowReader{data: pattern(10, 1), delay: sleep}); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+	// The whole Append took longer than the timeout, but last-active was
+	// refreshed when it returned, so a Sweep called right away must not
+	// treat the session as idle.
+	if n := m.Sweep(time.Now()); n != 0 {
+		t.Fatalf("Sweep removed a session immediately after a slow Append finished")
+	}
+}
+
+// TestSpoolOpenSurvivesManagerRemove verifies that a reader obtained from
+// Spool.Open before Manager.Remove deletes the session's file keeps
+// reading the original bytes: on Unix an open file descriptor is
+// unaffected by unlinking its directory entry.
+func TestSpoolOpenSurvivesManagerRemove(t *testing.T) {
+	m, dir := newTestManager(t, 16, time.Hour)
+	s, err := m.Create()
+	if err != nil {
+		t.Fatal(err)
+	}
+	data := pattern(1000, 9)
+	appendBytes(t, s, data)
+	if names := dirNames(t, dir); len(names) != 1 {
+		t.Fatalf("dir entries = %v, want exactly one (session should have spilled)", names)
+	}
+
+	sp, err := s.Spool()
+	if err != nil {
+		t.Fatalf("Spool: %v", err)
+	}
+	r, err := sp.Open()
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	c, ok := r.(io.Closer)
+	if !ok {
+		t.Fatal("file spool reader does not implement io.Closer")
+	}
+	defer c.Close()
+
+	if err := m.Remove(s.ID); err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+	if names := dirNames(t, dir); len(names) != 0 {
+		t.Fatalf("file still present after Remove: %v", names)
+	}
+
+	got, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatalf("ReadAll after Remove: %v", err)
+	}
+	if !bytes.Equal(got, data) {
+		t.Fatal("reader opened before Remove did not read the original bytes")
+	}
+	if oci.DigestOfBytes(got) != sp.Digest() {
+		t.Fatalf("digest mismatch: got %s, want %s", oci.DigestOfBytes(got), sp.Digest())
 	}
 }
