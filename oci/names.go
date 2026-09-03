@@ -6,19 +6,19 @@ import "regexp"
 const MaxRepositoryLength = 255
 
 var (
-	// repositoryRe is the repository grammar from the design spec:
-	// path components of [a-z0-9] runs joined by a single '.', '_' or '-',
+	// repositoryRe is the OCI distribution grammar: separators are a dot,
+	// one or two underscores, or a run of hyphens, joining [a-z0-9] runs;
 	// components joined by '/'.
-	repositoryRe = regexp.MustCompile(`^[a-z0-9]+(?:[._-][a-z0-9]+)*(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)*$`)
+	repositoryRe = regexp.MustCompile(`^[a-z0-9]+(?:(?:\.|_|__|-+)[a-z0-9]+)*(?:/[a-z0-9]+(?:(?:\.|_|__|-+)[a-z0-9]+)*)*$`)
 	// tagRe is the distribution-spec tag grammar: at most 128 characters.
 	tagRe = regexp.MustCompile(`^[a-zA-Z0-9_][a-zA-Z0-9._-]{0,127}$`)
 )
 
-// ValidateRepository checks name against
-// [a-z0-9]+(?:[._-][a-z0-9]+)*(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)* with a
-// MaxRepositoryLength byte limit. A valid name never contains ':' or '@', so
-// it can be embedded in amber reference names. Failures are *Error values
-// with CodeNameInvalid.
+// ValidateRepository checks name against the OCI distribution grammar:
+// separators are a dot, one or two underscores, or a run of hyphens, joining
+// [a-z0-9] runs, with a MaxRepositoryLength byte limit. A valid name never
+// contains ':' or '@', so it can be embedded in amber reference names.
+// Failures are *Error values with CodeNameInvalid.
 func ValidateRepository(name string) error {
 	if name == "" {
 		return NewError(CodeNameInvalid, "invalid repository name: empty")
