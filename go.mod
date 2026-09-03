@@ -2,6 +2,8 @@ module github.com/draganm/oci-amber
 
 go 1.26.6
 
+require github.com/jobs-build/amber-store-core v0.0.3-0.20260827084116-2d22eef35a31
+
 require (
 	github.com/DataDog/zstd v1.5.7 // indirect
 	github.com/FastFilter/xorfilter v0.5.1 // indirect
@@ -28,7 +30,6 @@ require (
 	github.com/golang/protobuf v1.5.4 // indirect
 	github.com/golang/snappy v0.0.5-0.20231225225746-43d5d4cd4e0e // indirect
 	github.com/jbenet/go-context v0.0.0-20150711004518-d14ea06fba99 // indirect
-	github.com/jobs-build/amber-store-core v0.0.3-0.20260827084116-2d22eef35a31 // indirect
 	github.com/klauspost/compress v1.20.0 // indirect
 	github.com/klauspost/cpuid/v2 v2.0.12 // indirect
 	github.com/kr/pretty v0.3.1 // indirect
