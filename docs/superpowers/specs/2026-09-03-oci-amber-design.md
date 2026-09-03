@@ -391,8 +391,11 @@ Routing is a small hand-written matcher because repository names contain
 slashes: the path is matched against
 `^/v2/(?P<name>.+)/(blobs|manifests|tags|referrers)/(?P<rest>.*)$` with a
 greedy name, so the last such segment wins, then `name` is validated against
-the OCI grammar `[a-z0-9]+(?:[._-][a-z0-9]+)*(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)*`
-(max 255 bytes), tags against `[a-zA-Z0-9_][a-zA-Z0-9._-]{0,127}`, digests
+the OCI distribution grammar
+`[a-z0-9]+(?:(?:\.|_|__|-+)[a-z0-9]+)*(?:/[a-z0-9]+(?:(?:\.|_|__|-+)[a-z0-9]+)*)*`
+(max 255 bytes; a single dot, a single or double underscore, or a run of
+hyphens separates alphanumeric runs), tags against
+`[a-zA-Z0-9_][a-zA-Z0-9._-]{0,127}`, digests
 against `sha256:[a-f0-9]{64}`. Invalid names are `400 NAME_INVALID`.
 
 | Method and path | Behaviour |
