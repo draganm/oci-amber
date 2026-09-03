@@ -101,6 +101,8 @@ func (s *server) dispatch(w http.ResponseWriter, r *http.Request, rt route) {
 	switch rt.kind {
 	case "blobs":
 		s.handleBlob(w, r, rt)
+	case "uploads":
+		s.handleUpload(w, r, rt)
 	default:
 		s.notFound(w)
 	}
