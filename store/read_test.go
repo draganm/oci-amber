@@ -422,6 +422,62 @@ func TestReader_SkipPastEnd(t *testing.T) {
 	})
 }
 
+// rtTruncate wraps a Reader's get so the Blob bad comes back one byte short
+// of its key's length, while every other key passes through unchanged. It
+// proves Skip and fill report an error instead of panicking on a truncated
+// or corrupt stored object.
+func rtTruncate(r *Reader, bad key.Key) {
+	get := r.get
+	r.get = func(k key.Key) ([]byte, error) {
+		data, err := get(k)
+		if err != nil || k != bad {
+			return data, err
+		}
+		return data[:len(data)-1], nil
+	}
+}
+
+func TestReader_TruncatedObject(t *testing.T) {
+	st := rtStore(t)
+	data := rtRandom(t, 3<<20)
+	k := rtPut(t, st, data)
+	leaves := rtLeaves(t, st, k)
+	if len(leaves) < 2 {
+		t.Fatalf("3 MiB file split into %d chunks, want at least 2", len(leaves))
+	}
+	bad := leaves[1]
+	if bad.Length() < 1 {
+		t.Fatalf("leaf 1 is empty, want at least 1 byte to truncate")
+	}
+	wantErr := fmt.Sprintf("store: object %s is %d bytes, key says %d", bad, bad.Length()-1, bad.Length())
+
+	t.Run("skip", func(t *testing.T) {
+		r := st.NewReader(k)
+		rtTruncate(r, bad)
+		if err := r.Skip(int64(leaves[0].Length()) + 1); err == nil {
+			t.Fatal("Skip into a truncated chunk succeeded, want error")
+		} else if err.Error() != wantErr {
+			t.Fatalf("Skip error = %q, want %q", err.Error(), wantErr)
+		}
+		// The error is sticky.
+		if err := r.Skip(1); err == nil || err.Error() != wantErr {
+			t.Fatalf("Skip after the error = %v, want the same sticky error", err)
+		}
+	})
+
+	t.Run("read", func(t *testing.T) {
+		r := st.NewReader(k)
+		rtTruncate(r, bad)
+		_, err := io.ReadAll(r)
+		if err == nil {
+			t.Fatal("ReadAll through a truncated chunk succeeded, want error")
+		}
+		if err.Error() != wantErr {
+			t.Fatalf("ReadAll error = %q, want %q", err.Error(), wantErr)
+		}
+	})
+}
+
 func TestReader_MultiLevelTree(t *testing.T) {
 	st := rtStore(t)
 	w := st.NewWriter(context.Background())

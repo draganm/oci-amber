@@ -111,6 +111,9 @@ func (r *Reader) fill() error {
 			if err != nil {
 				return fmt.Errorf("store: reading %s: %w", k, err)
 			}
+			if uint64(len(data)) != k.Length() {
+				return fmt.Errorf("store: object %s is %d bytes, key says %d", k, len(data), k.Length())
+			}
 			r.cur = data
 		case key.FileNode:
 			if err := r.descend(k); err != nil {
@@ -176,6 +179,10 @@ func (r *Reader) Skip(n int64) error {
 			data, err := r.get(k)
 			if err != nil {
 				r.err = fmt.Errorf("store: reading %s: %w", k, err)
+				return r.err
+			}
+			if uint64(len(data)) != k.Length() {
+				r.err = fmt.Errorf("store: object %s is %d bytes, key says %d", k, len(data), k.Length())
 				return r.err
 			}
 			r.cur = data[n:]
