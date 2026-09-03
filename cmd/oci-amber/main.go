@@ -1,0 +1,291 @@
+// Command oci-amber runs an OCI distribution registry whose storage is an
+// embedded amber store. The only subcommand is `serve`.
+package main
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"log/slog"
+	"net"
+	"net/http"
+	"os"
+	"os/signal"
+	"path/filepath"
+	"runtime"
+	"strings"
+	"syscall"
+	"time"
+
+	"github.com/draganm/oci-amber/blob"
+	"github.com/draganm/oci-amber/image"
+	"github.com/draganm/oci-amber/registry"
+	"github.com/draganm/oci-amber/store"
+	"github.com/draganm/oci-amber/upload"
+	"github.com/urfave/cli/v2"
+)
+
+const (
+	// readHeaderTimeout bounds how long a client may take to send request
+	// headers. Bodies (blob uploads) are deliberately unbounded.
+	readHeaderTimeout = 10 * time.Second
+	// shutdownTimeout is how long graceful shutdown waits for in-flight
+	// handlers before connections are cut and the store is closed anyway.
+	shutdownTimeout = 30 * time.Second
+	// envPrefix plus the upper-cased, underscored flag name is the environment
+	// variable that can set a flag (--max-in-memory -> OCI_AMBER_MAX_IN_MEMORY).
+	envPrefix = "OCI_AMBER_"
+
+	defaultListen             = ":5000"
+	defaultMaxInMemory        = "64MiB"
+	defaultAnalyzeParallelism = 2
+	defaultAnalyzeTimeout     = 15 * time.Minute
+	defaultUploadTimeout      = time.Hour
+	defaultLogLevel           = "info"
+)
+
+// config is everything `serve` needs. configFromCLI fills it from flags;
+// tests construct it directly and call run.
+type config struct {
+	Store                 string
+	WorkDir               string // "" means <Store>/work
+	Listen                string
+	MaxInMemory           int64
+	AnalyzeParallelism    int
+	AnalyzeTimeout        time.Duration
+	MaxConcurrentFinalize int
+	VerifyRoundTrip       bool
+	UploadTimeout         time.Duration
+	GCInterval            time.Duration
+	LogLevel              slog.Level
+	LogOutput             io.Writer           // nil means os.Stderr
+	OnListen              func(addr net.Addr) // optional; called once the listener is bound
+}
+
+func main() {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	if err := newApp(run).RunContext(ctx, os.Args); err != nil {
+		fmt.Fprintln(os.Stderr, "oci-amber:", err)
+		os.Exit(1)
+	}
+}
+
+// defaultMaxConcurrentFinalize is NumCPU/2 with a floor of 1.
+func defaultMaxConcurrentFinalize() int {
+	return max(1, runtime.NumCPU()/2)
+}
+
+// envVar returns the environment variable that sets the named flag.
+func envVar(flag string) []string {
+	return []string{envPrefix + strings.ToUpper(strings.ReplaceAll(flag, "-", "_"))}
+}
+
+// newApp builds the command line application. serve is what the `serve`
+// subcommand runs once its flags have been validated; main passes run and
+// tests pass a function that captures the config.
+func newApp(serve func(ctx context.Context, cfg config) error) *cli.App {
+	return &cli.App{
+		Name:            "oci-amber",
+		Usage:           "OCI distribution registry backed by an embedded amber store",
+		HideHelpCommand: true,
+		Commands: []*cli.Command{{
+			Name:  "serve",
+			Usage: "run the registry",
+			Flags: serveFlags(),
+			Action: func(c *cli.Context) error {
+				cfg, err := configFromCLI(c)
+				if err != nil {
+					return err
+				}
+				return serve(c.Context, cfg)
+			},
+		}},
+	}
+}
+
+// serveFlags is the flag table from the spec's Configuration section. Every
+// flag can also be set through OCI_AMBER_<FLAG>.
+func serveFlags() []cli.Flag {
+	return []cli.Flag{
+		&cli.StringFlag{Name: "store", Usage: "store `directory` (required)", EnvVars: envVar("store"), Required: true},
+		&cli.StringFlag{Name: "work-dir", Usage: "`directory` for spilled uploads and the comp-prysm spool (default: <store>/work)", EnvVars: envVar("work-dir")},
+		&cli.StringFlag{Name: "listen", Value: defaultListen, Usage: "listen `address`", EnvVars: envVar("listen")},
+		&cli.StringFlag{Name: "max-in-memory", Value: defaultMaxInMemory, Usage: "upload spool and comp-prysm spool threshold (`size` with unit B, KiB, MiB, GiB, KB, MB or GB)", EnvVars: envVar("max-in-memory")},
+		&cli.IntFlag{Name: "analyze-parallelism", Value: defaultAnalyzeParallelism, Usage: "comp-prysm candidate `workers` per blob", EnvVars: envVar("analyze-parallelism")},
+		&cli.DurationFlag{Name: "analyze-timeout", Value: defaultAnalyzeTimeout, Usage: "per-blob analyze `deadline` before raw fallback", EnvVars: envVar("analyze-timeout")},
+		&cli.IntFlag{Name: "max-concurrent-finalize", Value: defaultMaxConcurrentFinalize(), Usage: "concurrent blob finalizations (`count`, default NumCPU/2, minimum 1)", EnvVars: envVar("max-concurrent-finalize")},
+		&cli.BoolFlag{Name: "verify-roundtrip", Value: true, Usage: "run the pull pipeline over every prism before publishing it", EnvVars: envVar("verify-roundtrip")},
+		&cli.DurationFlag{Name: "upload-timeout", Value: defaultUploadTimeout, Usage: "idle upload session expiry and recent-uploads table TTL (`duration`)", EnvVars: envVar("upload-timeout")},
+		&cli.DurationFlag{Name: "gc-interval", Value: 0, Usage: "background GC cycle `interval`, 0 disables", EnvVars: envVar("gc-interval")},
+		&cli.StringFlag{Name: "log-level", Value: defaultLogLevel, Usage: "log `level`: debug, info, warn or error", EnvVars: envVar("log-level")},
+	}
+}
+
+// configFromCLI reads and validates the serve flags.
+func configFromCLI(c *cli.Context) (config, error) {
+	cfg := config{
+		Store:                 c.String("store"),
+		WorkDir:               c.String("work-dir"),
+		Listen:                c.String("listen"),
+		AnalyzeParallelism:    c.Int("analyze-parallelism"),
+		AnalyzeTimeout:        c.Duration("analyze-timeout"),
+		MaxConcurrentFinalize: c.Int("max-concurrent-finalize"),
+		VerifyRoundTrip:       c.Bool("verify-roundtrip"),
+		UploadTimeout:         c.Duration("upload-timeout"),
+		GCInterval:            c.Duration("gc-interval"),
+	}
+	if cfg.Store == "" {
+		return config{}, errors.New("--store must not be empty")
+	}
+	if cfg.WorkDir == "" {
+		cfg.WorkDir = filepath.Join(cfg.Store, "work")
+	}
+	if cfg.Listen == "" {
+		return config{}, errors.New("--listen must not be empty")
+	}
+	size, err := parseSize(c.String("max-in-memory"))
+	if err != nil {
+		return config{}, fmt.Errorf("--max-in-memory: %w", err)
+	}
+	cfg.MaxInMemory = size
+	if cfg.AnalyzeParallelism < 1 {
+		return config{}, fmt.Errorf("--analyze-parallelism must be at least 1, got %d", cfg.AnalyzeParallelism)
+	}
+	if cfg.AnalyzeTimeout <= 0 {
+		return config{}, fmt.Errorf("--analyze-timeout must be positive, got %s", cfg.AnalyzeTimeout)
+	}
+	if cfg.MaxConcurrentFinalize < 1 {
+		return config{}, fmt.Errorf("--max-concurrent-finalize must be at least 1, got %d", cfg.MaxConcurrentFinalize)
+	}
+	if cfg.UploadTimeout <= 0 {
+		return config{}, fmt.Errorf("--upload-timeout must be positive, got %s", cfg.UploadTimeout)
+	}
+	if cfg.GCInterval < 0 {
+		return config{}, fmt.Errorf("--gc-interval must not be negative, got %s", cfg.GCInterval)
+	}
+	level, err := parseLogLevel(c.String("log-level"))
+	if err != nil {
+		return config{}, fmt.Errorf("--log-level: %w", err)
+	}
+	cfg.LogLevel = level
+	return cfg, nil
+}
+
+// run opens the store, wires the packages together and serves until ctx is
+// cancelled, then shuts down gracefully: stop accepting, wait up to
+// shutdownTimeout for handlers, close the upload manager and the store. It
+// returns nil after a clean shutdown.
+func run(ctx context.Context, cfg config) error {
+	if cfg.Store == "" {
+		return errors.New("store directory is required")
+	}
+	if cfg.Listen == "" {
+		return errors.New("listen address is required")
+	}
+	out := cfg.LogOutput
+	if out == nil {
+		out = os.Stderr
+	}
+	log := slog.New(slog.NewTextHandler(out, &slog.HandlerOptions{Level: cfg.LogLevel}))
+
+	workDir := cfg.WorkDir
+	if workDir == "" {
+		workDir = filepath.Join(cfg.Store, "work")
+	}
+	spoolDir := filepath.Join(workDir, "spool")
+	uploadsDir := filepath.Join(workDir, "uploads")
+	// The work directory only ever holds in-flight state, so both halves are
+	// emptied at startup. upload.NewManager empties uploads/ itself and
+	// blob.New recreates spool/.
+	if err := os.RemoveAll(spoolDir); err != nil {
+		return fmt.Errorf("emptying %s: %w", spoolDir, err)
+	}
+	if err := os.MkdirAll(workDir, 0o755); err != nil {
+		return fmt.Errorf("creating work directory %s: %w", workDir, err)
+	}
+
+	st, err := store.Open(cfg.Store, store.Options{GCInterval: cfg.GCInterval, Logger: log})
+	if err != nil {
+		return fmt.Errorf("opening store %s: %w", cfg.Store, err)
+	}
+
+	blobs, err := blob.New(st, blob.Options{
+		WorkDir:               workDir,
+		MaxInMemory:           cfg.MaxInMemory,
+		AnalyzeParallelism:    cfg.AnalyzeParallelism,
+		AnalyzeTimeout:        cfg.AnalyzeTimeout,
+		MaxConcurrentFinalize: cfg.MaxConcurrentFinalize,
+		VerifyRoundTrip:       cfg.VerifyRoundTrip,
+		RecentTTL:             cfg.UploadTimeout,
+	}, log)
+	if err != nil {
+		return errors.Join(fmt.Errorf("creating blob store: %w", err), st.Close())
+	}
+
+	uploads, err := upload.NewManager(uploadsDir, cfg.MaxInMemory, cfg.UploadTimeout, log)
+	if err != nil {
+		return errors.Join(fmt.Errorf("creating upload manager: %w", err), st.Close())
+	}
+
+	images := image.New(st, blobs, log)
+	handler := registry.New(blobs, images, uploads, log)
+
+	ln, err := net.Listen("tcp", cfg.Listen)
+	if err != nil {
+		return errors.Join(fmt.Errorf("listening on %s: %w", cfg.Listen, err), uploads.Close(), st.Close())
+	}
+
+	srv := &http.Server{
+		Handler:           handler,
+		ReadHeaderTimeout: readHeaderTimeout,
+		ErrorLog:          slog.NewLogLogger(log.Handler(), slog.LevelWarn),
+	}
+	log.Info("oci-amber listening",
+		"addr", ln.Addr().String(),
+		"store", cfg.Store,
+		"work_dir", workDir,
+		"max_in_memory", cfg.MaxInMemory,
+		"analyze_parallelism", cfg.AnalyzeParallelism,
+		"analyze_timeout", cfg.AnalyzeTimeout,
+		"max_concurrent_finalize", cfg.MaxConcurrentFinalize,
+		"verify_roundtrip", cfg.VerifyRoundTrip,
+		"upload_timeout", cfg.UploadTimeout,
+		"gc_interval", cfg.GCInterval,
+	)
+	if cfg.OnListen != nil {
+		cfg.OnListen(ln.Addr())
+	}
+
+	serveErr := make(chan error, 1)
+	go func() { serveErr <- srv.Serve(ln) }()
+
+	var errs []error
+	select {
+	case err := <-serveErr:
+		// Serve only returns on its own when accepting fails; Shutdown has
+		// not been called, so this is never ErrServerClosed.
+		errs = append(errs, fmt.Errorf("serving on %s: %w", ln.Addr(), err))
+	case <-ctx.Done():
+		log.Info("shutting down", "reason", ctx.Err().Error(), "timeout", shutdownTimeout)
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+		if err := srv.Shutdown(shutdownCtx); err != nil {
+			log.Warn("handlers still running after shutdown timeout; closing connections", "error", err)
+			if err := srv.Close(); err != nil {
+				log.Warn("closing server", "error", err)
+			}
+		}
+		cancel()
+		<-serveErr // http.ErrServerClosed, as soon as Shutdown/Close was called
+	}
+
+	if err := uploads.Close(); err != nil {
+		errs = append(errs, fmt.Errorf("closing upload manager: %w", err))
+	}
+	if err := st.Close(); err != nil {
+		errs = append(errs, fmt.Errorf("closing store: %w", err))
+	}
+	log.Info("oci-amber stopped")
+	return errors.Join(errs...)
+}
