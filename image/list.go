@@ -1,8 +1,11 @@
 package image
 
 import (
+	"cmp"
 	"fmt"
 	"slices"
+
+	"github.com/draganm/oci-amber/oci"
 )
 
 // Tags returns the tags of repo in bytewise order, which is the
@@ -56,4 +59,46 @@ func (s *Store) repoHasManifests(repo string) (bool, error) {
 		}
 	}
 	return false, nil
+}
+
+// Referrers returns one descriptor per manifest or index in repo whose
+// subject is subject, sorted by digest. Each descriptor carries the
+// mediaType, digest, size, artifactType and annotations recorded in the
+// referrer's meta.json at push time. That artifactType is already the
+// manifest's own artifactType, or the config media type for an image
+// manifest without one, or empty for an index without one, so the descriptor
+// follows the distribution spec's rules without re-parsing the manifest.
+//
+// A non-empty artifactType keeps only descriptors whose artifactType equals
+// it exactly. The result is never nil: an unknown subject, a subject nobody
+// refers to, or a filter that matches nothing yields an empty slice, which
+// the registry serves as an index with an empty manifests list.
+func (s *Store) Referrers(repo string, subject oci.Digest, artifactType string) ([]oci.Descriptor, error) {
+	refs, err := s.st.ListRefs(ReferrerRef(repo, subject, ""))
+	if err != nil {
+		return nil, fmt.Errorf("image: listing referrers of %s in %s: %w", subject, repo, err)
+	}
+	out := make([]oci.Descriptor, 0, len(refs))
+	for _, r := range refs {
+		refRepo, refSubject, _, ok := ParseReferrerRef(r.Name)
+		if !ok || refRepo != repo || refSubject != subject {
+			continue
+		}
+		m, err := s.readMeta(r.Key)
+		if err != nil {
+			return nil, fmt.Errorf("image: reading referrer %s: %w", r.Name, err)
+		}
+		if artifactType != "" && m.ArtifactType != artifactType {
+			continue
+		}
+		out = append(out, oci.Descriptor{
+			MediaType:    m.MediaType,
+			Digest:       m.Digest,
+			Size:         m.Size,
+			ArtifactType: m.ArtifactType,
+			Annotations:  m.Annotations,
+		})
+	}
+	slices.SortFunc(out, func(a, b oci.Descriptor) int { return cmp.Compare(a.Digest, b.Digest) })
+	return out, nil
 }
