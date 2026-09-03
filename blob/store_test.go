@@ -198,29 +198,3 @@ func TestBuildRootAndOpen(t *testing.T) {
 		}
 	}
 }
-
-func TestKeyedMutexSerializes(t *testing.T) {
-	var km keyedMutex
-	d := oci.DigestOfBytes([]byte("d"))
-	unlock := km.lock(d)
-	acquired := make(chan struct{})
-	go func() {
-		u := km.lock(d)
-		close(acquired)
-		u()
-	}()
-	select {
-	case <-acquired:
-		t.Fatal("second lock acquired while the first is held")
-	case <-time.After(50 * time.Millisecond):
-	}
-	// Another digest is independent.
-	u2 := km.lock(oci.DigestOfBytes([]byte("e")))
-	u2()
-	unlock()
-	select {
-	case <-acquired:
-	case <-time.After(time.Second):
-		t.Fatal("second lock never acquired")
-	}
-}

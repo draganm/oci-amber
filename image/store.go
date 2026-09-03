@@ -10,10 +10,10 @@ import (
 	"log/slog"
 	"maps"
 	"slices"
-	"sync"
 	"time"
 
 	"github.com/draganm/oci-amber/blob"
+	"github.com/draganm/oci-amber/keyedmutex"
 	"github.com/draganm/oci-amber/oci"
 	"github.com/draganm/oci-amber/store"
 	"github.com/jobs-build/amber-store-core/key"
@@ -25,7 +25,9 @@ type Store struct {
 	st    *store.Store
 	blobs *blob.Store
 	log   *slog.Logger
-	repos keyedMutex
+	// repos serializes Put and Delete per repository, so a delete's tag
+	// scan never interleaves with a publish in the same repository.
+	repos keyedmutex.Mutex[string]
 }
 
 // New returns a Store over st. blobs resolves config and layer digests and
@@ -36,30 +38,6 @@ func New(st *store.Store, blobs *blob.Store, log *slog.Logger) *Store {
 		log = slog.Default()
 	}
 	return &Store{st: st, blobs: blobs, log: log}
-}
-
-// keyedMutex serializes Put and Delete per repository, so a delete's tag
-// scan never interleaves with a publish in the same repository. Entries are
-// never freed; there is one per repository name ever touched.
-type keyedMutex struct {
-	mu sync.Mutex
-	m  map[string]*sync.Mutex
-}
-
-// lock locks the mutex for name and returns its unlock function.
-func (k *keyedMutex) lock(name string) func() {
-	k.mu.Lock()
-	if k.m == nil {
-		k.m = make(map[string]*sync.Mutex)
-	}
-	mu, ok := k.m[name]
-	if !ok {
-		mu = &sync.Mutex{}
-		k.m[name] = mu
-	}
-	k.mu.Unlock()
-	mu.Lock()
-	return mu.Unlock
 }
 
 // Image is an opened image root.
@@ -151,7 +129,7 @@ func (s *Store) Put(ctx context.Context, repo, reference, contentType string, bo
 		return nil, err
 	}
 
-	unlock := s.repos.lock(repo)
+	unlock := s.repos.Lock(repo)
 	defer unlock()
 
 	blobRoots, err := s.resolveBlobs(m)
@@ -400,7 +378,7 @@ func (s *Store) Delete(repo, reference string) error {
 	if err != nil {
 		return err
 	}
-	unlock := s.repos.lock(repo)
+	unlock := s.repos.Lock(repo)
 	defer unlock()
 
 	if !oci.IsDigest(reference) {

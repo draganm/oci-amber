@@ -15,6 +15,7 @@ import (
 	tarprism "github.com/draganm/tar-prism"
 	"github.com/jobs-build/amber-store-core/key"
 
+	"github.com/draganm/oci-amber/keyedmutex"
 	"github.com/draganm/oci-amber/oci"
 	"github.com/draganm/oci-amber/store"
 	"github.com/draganm/oci-amber/upload"
@@ -52,8 +53,8 @@ type Store struct {
 	st       *store.Store
 	opts     Options
 	log      *slog.Logger
-	finalize chan struct{} // finalize slots
-	digests  keyedMutex    // one finalization per digest at a time
+	finalize chan struct{}                // finalize slots
+	digests  keyedmutex.Mutex[oci.Digest] // one finalization per digest at a time
 	recentMu sync.Mutex
 	recent   map[oci.Digest]recentEntry
 }
@@ -155,7 +156,7 @@ func (b *Store) readMeta(root key.Key) (Meta, error) {
 // Delete removes oci/blob/<d>; the objects become garbage for amber's
 // collector. It waits for a finalization of the same digest to finish.
 func (b *Store) Delete(d oci.Digest) error {
-	unlock := b.digests.lock(d)
+	unlock := b.digests.Lock(d)
 	defer unlock()
 	err := b.st.DeleteRef(RefName(d))
 	if errors.Is(err, store.ErrNotFound) {
@@ -243,43 +244,6 @@ func (b *Store) buildRoot(w *store.Writer, meta Meta, files map[string]key.Key, 
 	return root, nil
 }
 
-// keyedMutex serializes work per digest. Its zero value is ready to use;
-// rows nobody holds or waits on are dropped.
-type keyedMutex struct {
-	mu    sync.Mutex
-	locks map[oci.Digest]*keyedLock
-}
-
-type keyedLock struct {
-	mu   sync.Mutex
-	refs int
-}
-
-// lock blocks until d is free and returns the matching unlock function.
-func (k *keyedMutex) lock(d oci.Digest) func() {
-	k.mu.Lock()
-	if k.locks == nil {
-		k.locks = make(map[oci.Digest]*keyedLock)
-	}
-	l, ok := k.locks[d]
-	if !ok {
-		l = &keyedLock{}
-		k.locks[d] = l
-	}
-	l.refs++
-	k.mu.Unlock()
-	l.mu.Lock()
-	return func() {
-		l.mu.Unlock()
-		k.mu.Lock()
-		l.refs--
-		if l.refs == 0 {
-			delete(k.locks, d)
-		}
-		k.mu.Unlock()
-	}
-}
-
 // Put finalizes an upload (spec "Blob finalization" steps 2-9): whole-blob
 // dedup, finalize slot, analyze and classify, prism or raw ingest through
 // the accounting writer, blob root, oci/blob/<digest> ref, recent-uploads
@@ -296,7 +260,7 @@ func (b *Store) Put(ctx context.Context, sp *upload.Spool) (*Meta, error) {
 	size := sp.Size()
 	start := time.Now()
 
-	unlock := b.digests.lock(d)
+	unlock := b.digests.Lock(d)
 	defer unlock()
 
 	if err := ctx.Err(); err != nil {
