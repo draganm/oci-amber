@@ -102,3 +102,38 @@ func (s *Store) Referrers(repo string, subject oci.Digest, artifactType string) 
 	slices.SortFunc(out, func(a, b oci.Descriptor) int { return cmp.Compare(a.Digest, b.Digest) })
 	return out, nil
 }
+
+// Repositories returns every repository that has at least one tag or
+// manifest ref, sorted bytewise and without duplicates; nested names such
+// as "library/app" are returned whole. Blob refs are global and do not name
+// a repository, and a referrer ref never exists without the referrer's own
+// manifest ref, so only the tag and manifest namespaces are scanned. The
+// two literal prefixes are the ones TagRef and ManifestRef build on, which
+// no builder call can yield bare. The result is never nil.
+func (s *Store) Repositories() ([]string, error) {
+	seen := make(map[string]struct{})
+	tagRefs, err := s.st.ListRefs("oci/tag/")
+	if err != nil {
+		return nil, fmt.Errorf("image: listing tag refs: %w", err)
+	}
+	for _, r := range tagRefs {
+		if repo, _, ok := ParseTagRef(r.Name); ok {
+			seen[repo] = struct{}{}
+		}
+	}
+	manifestRefs, err := s.st.ListRefs("oci/manifest/")
+	if err != nil {
+		return nil, fmt.Errorf("image: listing manifest refs: %w", err)
+	}
+	for _, r := range manifestRefs {
+		if repo, _, ok := ParseManifestRef(r.Name); ok {
+			seen[repo] = struct{}{}
+		}
+	}
+	repos := make([]string, 0, len(seen))
+	for repo := range seen {
+		repos = append(repos, repo)
+	}
+	slices.Sort(repos)
+	return repos, nil
+}
