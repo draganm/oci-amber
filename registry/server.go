@@ -98,7 +98,12 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // dispatch routes a validated route to the handler for its kind.
 func (s *server) dispatch(w http.ResponseWriter, r *http.Request, rt route) {
-	s.notFound(w)
+	switch rt.kind {
+	case "blobs":
+		s.handleBlob(w, r, rt)
+	default:
+		s.notFound(w)
+	}
 }
 
 // handleBase answers the API version check, GET /v2/.
