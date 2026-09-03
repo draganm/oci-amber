@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -513,16 +514,23 @@ func TestSweepDoesNotBlockOnAppend(t *testing.T) {
 
 // slowReader yields its data only after delay has passed, once, then
 // reports EOF. It simulates a request body that takes longer to arrive
-// than the manager's idle timeout.
+// than the manager's idle timeout. When entered is non-nil it is closed on
+// the first Read, which is a synchronisation point for "Append is now
+// inside its copy, holding the session mutex".
 type slowReader struct {
-	data  []byte
-	delay time.Duration
-	sent  bool
+	data    []byte
+	delay   time.Duration
+	entered chan struct{}
+	sent    bool
 }
 
 func (r *slowReader) Read(p []byte) (int, error) {
 	if r.sent {
 		return 0, io.EOF
+	}
+	if r.entered != nil {
+		close(r.entered)
+		r.entered = nil
 	}
 	time.Sleep(r.delay)
 	r.sent = true
@@ -559,6 +567,171 @@ func TestAppendRefreshesLastActiveOnExit(t *testing.T) {
 	// treat the session as idle.
 	if n := m.Sweep(time.Now()); n != 0 {
 		t.Fatalf("Sweep removed a session immediately after a slow Append finished")
+	}
+}
+
+// pacedBodyReader hands out one chunk per Read, waiting delay before each
+// one, until release is closed; the next Read then reports EOF. It stands
+// in for a request body that keeps arriving for longer than the manager's
+// idle timeout, so the copy inside Append is guaranteed to still be running
+// when the test sweeps. started is closed on the first Read.
+type pacedBodyReader struct {
+	chunk   []byte
+	delay   time.Duration
+	release <-chan struct{}
+	started chan struct{}
+	once    sync.Once
+	n       int64 // bytes handed out; read once Append has returned
+}
+
+func (r *pacedBodyReader) Read(p []byte) (int, error) {
+	select {
+	case <-r.release:
+		return 0, io.EOF
+	default:
+	}
+	time.Sleep(r.delay)
+	r.once.Do(func() { close(r.started) })
+	n := copy(p, r.chunk)
+	r.n += int64(n)
+	return n, nil
+}
+
+// TestSweepSkipsSessionActiveDuringAppend is a regression test for a
+// sweeper that discarded any upload whose single request body took longer
+// than the idle timeout to arrive: Append touched last-active only on entry
+// and on exit, so a sweep landing in the middle of the copy saw the entry
+// timestamp, collected the session, blocked on its mutex until the copy
+// finished and then closed it — the client's PUT then got
+// BLOB_UPLOAD_UNKNOWN. A session that is receiving bytes is not idle.
+func TestSweepSkipsSessionActiveDuringAppend(t *testing.T) {
+	const timeout = 50 * time.Millisecond
+	// Built directly (not via NewManager) so no background sweeper races
+	// with the explicit Sweep below. maxInMemory 1 makes the session spill
+	// to its file on the first write.
+	dir := t.TempDir()
+	m := &Manager{
+		dir:         dir,
+		maxInMemory: 1,
+		timeout:     timeout,
+		log:         slog.New(slog.NewTextHandler(io.Discard, nil)),
+		sessions:    map[string]*Session{},
+	}
+	s := newSession(testID, filepath.Join(dir, testID), m.maxInMemory, time.Now())
+	m.sessions[testID] = s
+
+	release := make(chan struct{})
+	body := &pacedBodyReader{
+		chunk:   pattern(1024, 7),
+		delay:   10 * time.Millisecond,
+		release: release,
+		started: make(chan struct{}),
+	}
+	start := time.Now()
+	appendDone := make(chan error, 1)
+	var appended int64
+	go func() {
+		n, err := s.Append(body)
+		appended = n
+		appendDone <- err
+	}()
+	<-body.started
+
+	// Sweep only once the body has been arriving for longer than the idle
+	// timeout, which is exactly the case the sweeper used to get wrong.
+	for time.Since(start) <= 2*timeout {
+		time.Sleep(timeout / 5)
+	}
+	swept := make(chan int, 1)
+	go func() { swept <- m.Sweep(time.Now()) }()
+	select {
+	case n := <-swept:
+		if n != 0 {
+			t.Errorf("Sweep removed %d sessions while a request body was still arriving", n)
+		}
+	case <-time.After(5 * time.Second):
+		t.Error("Sweep blocked on the session mutex held by an in-progress Append")
+	}
+	if n := sessionCount(m); n != 1 {
+		t.Errorf("session count after the sweep = %d, want 1", n)
+	}
+	if _, err := os.Stat(s.path); err != nil {
+		t.Errorf("spooled file after the sweep: %v", err)
+	}
+
+	close(release)
+	if err := <-appendDone; err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+	if body.n == 0 {
+		t.Fatal("the body delivered no bytes")
+	}
+	if appended != body.n {
+		t.Fatalf("Append returned offset %d, the body delivered %d bytes", appended, body.n)
+	}
+	if got := s.Offset(); got != body.n {
+		t.Fatalf("Offset = %d, want %d", got, body.n)
+	}
+}
+
+// TestSweepSkipsSessionThatBecameActiveWhileBlocked covers the other half
+// of the same fix: a session that really was idle when the sweeper
+// collected it, but received bytes while the sweeper was waiting for its
+// mutex, must be left alone instead of being closed on the strength of the
+// stale reading. The body delivers nothing for the first 250 ms, so the
+// collection pass is guaranteed to see the idle timestamp and then block in
+// Offset until the append is done.
+func TestSweepSkipsSessionThatBecameActiveWhileBlocked(t *testing.T) {
+	const (
+		timeout = 50 * time.Millisecond
+		sleep   = 250 * time.Millisecond
+	)
+	dir := t.TempDir()
+	m := &Manager{
+		dir:         dir,
+		maxInMemory: 1,
+		timeout:     timeout,
+		log:         slog.New(slog.NewTextHandler(io.Discard, nil)),
+		sessions:    map[string]*Session{},
+	}
+	s := newSession(testID, filepath.Join(dir, testID), m.maxInMemory, time.Now())
+	m.sessions[testID] = s
+	first := appendBytes(t, s, pattern(16, 3))
+	setLastActive(s, time.Now().Add(-time.Hour))
+
+	body := &slowReader{data: pattern(64, 4), delay: sleep, entered: make(chan struct{})}
+	entered := body.entered
+	start := time.Now()
+	appendDone := make(chan error, 1)
+	go func() {
+		_, err := s.Append(body)
+		appendDone <- err
+	}()
+	<-entered // Append is inside its copy, holding the session mutex.
+
+	// Sweep once Append's entry touch has aged past the timeout but well
+	// before the body delivers its first byte, so the collection pass sees
+	// an idle session and then has to wait for the mutex.
+	for time.Since(start) <= 2*timeout {
+		time.Sleep(timeout / 5)
+	}
+	if n := m.Sweep(time.Now()); n != 0 {
+		t.Errorf("Sweep removed %d sessions that became active while it waited, want 0", n)
+	}
+	if err := <-appendDone; err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+	if n := sessionCount(m); n != 1 {
+		t.Errorf("session count after the sweep = %d, want 1", n)
+	}
+	if _, err := os.Stat(s.path); err != nil {
+		t.Errorf("spooled file after the sweep: %v", err)
+	}
+	if got, want := s.Offset(), first+64; got != want {
+		t.Fatalf("Offset = %d, want %d", got, want)
+	}
+	if _, err := m.Get(testID); err != nil {
+		t.Fatalf("Get after the sweep = %v, want the session to still be usable", err)
 	}
 }
 

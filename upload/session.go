@@ -71,10 +71,11 @@ func newSession(id, path string, maxInMemory int64, now time.Time) *Session {
 // failure stay in the session and the returned offset counts them. On a
 // removed session it returns ErrUnknown.
 //
-// last-active is touched both on entry and again right before Append
-// returns, so a slow request body (one that takes longer than the idle
-// timeout to arrive) is not swept the instant it finishes: the sweeper only
-// ever sees a fresh timestamp once the copy is done.
+// last-active is touched on entry, on every write of the copy (see write)
+// and again right before Append returns, so a session that is receiving
+// bytes never looks idle to the sweeper: a request body that takes longer
+// than the idle timeout to arrive is neither swept mid-transfer nor the
+// instant it finishes.
 func (s *Session) Append(r io.Reader) (int64, error) {
 	s.touch()
 	s.mu.Lock()
@@ -129,7 +130,13 @@ func (w sessionWriter) Write(p []byte) (int, error) { return w.s.write(p) }
 
 // write appends p, spilling the buffer to the file first when p would push
 // the in-memory total over maxInMemory. The caller holds mu.
+//
+// Every write records activity: Append holds mu for the whole copy of a
+// request body, so without a touch per write a body that takes longer than
+// the idle timeout to arrive would look idle to Manager.Sweep from the
+// moment its entry timestamp aged out until the copy finished.
 func (s *Session) write(p []byte) (int, error) {
+	s.touch()
 	if s.file == nil && s.size+int64(len(p)) > s.maxInMemory {
 		if err := s.spill(); err != nil {
 			return 0, err

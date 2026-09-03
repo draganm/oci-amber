@@ -170,10 +170,18 @@ func (m *Manager) Remove(id string) error {
 }
 
 // Sweep removes every session whose last activity is more than the timeout
-// before now, together with its file, and returns how many it removed. A
+// before now, together with its file, and returns how many it expired. A
 // session's file is always removed before the session is forgotten (dropped
 // from the map), so once a caller observes a session gone from the map, its
 // file is already gone too.
+//
+// Idleness is checked twice against the same deadline: once to collect the
+// candidates and once more after Offset has returned. Offset waits for the
+// session mutex, which an Append holds for the whole copy of a request
+// body, so between the two checks an arbitrary amount of time can pass and
+// the session may have received bytes (every write touches last-active). A
+// session that became active again in that window is left alone: it is
+// neither closed nor forgotten, and the next sweep considers it again.
 func (m *Manager) Sweep(now time.Time) int {
 	m.mu.Lock()
 	var expired []*Session
@@ -183,8 +191,14 @@ func (m *Manager) Sweep(now time.Time) int {
 		}
 	}
 	m.mu.Unlock()
+	swept := 0
 	for _, s := range expired {
 		size := s.Offset()
+		if now.Sub(s.active()) <= m.timeout {
+			m.log.Debug("upload session became active again, not expiring", "id", s.ID, "size", size)
+			continue
+		}
+		swept++
 		if err := s.close(); err != nil {
 			m.log.Error("removing expired upload session", "id", s.ID, "path", s.path, "error", err)
 			continue
@@ -196,7 +210,7 @@ func (m *Manager) Sweep(now time.Time) int {
 		}
 		m.mu.Unlock()
 	}
-	return len(expired)
+	return swept
 }
 
 // Close stops the sweeper, attempts to remove every session's file and
