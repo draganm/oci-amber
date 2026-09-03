@@ -94,6 +94,10 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.handleBase(w, r)
 		return
 	}
+	if p == "/v2/_catalog" {
+		s.handleCatalog(w, r)
+		return
+	}
 	rt, ok := parsePath(p)
 	if !ok {
 		s.notFound(w)
@@ -115,6 +119,10 @@ func (s *server) dispatch(w http.ResponseWriter, r *http.Request, rt route) {
 		s.handleUpload(w, r, rt)
 	case "manifests":
 		s.handleManifests(w, r, rt)
+	case "tags":
+		s.handleTags(w, r, rt)
+	case "referrers":
+		s.handleReferrers(w, r, rt)
 	default:
 		s.notFound(w)
 	}
