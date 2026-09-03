@@ -131,7 +131,6 @@ raw           the verbatim uploaded bytes                       raw only
   "size": 12345678,
   "kind": "prism",
   "format": "gzip",
-  "rawReason": "",
   "diffId": "sha256:…",
   "uncompressedSize": 45678901,
   "entries": 1234,
@@ -152,7 +151,7 @@ raw           the verbatim uploaded bytes                       raw only
 - `size` is the OCI blob size (compressed bytes as received).
 - `kind` is `prism` or `raw`.
 - `format` is comp-prysm's detected format: `gzip`, `zstd` or `none`.
-- `rawReason` is empty for prisms; for raw blobs one of `not-reproducible`,
+- `rawReason` is omitted for prisms; for raw blobs one of `not-reproducible`,
   `unsupported`, `corrupt`, `not-tar`, `analyze-timeout`, `roundtrip-failed`,
   `decompose-failed`.
 - `diffId`, `uncompressedSize`, `entries`, `engine`, `engineVersion` are
@@ -241,10 +240,12 @@ random 128-bit hex id. It holds:
 
 Sessions live in a mutex-protected map. A sweeper removes sessions idle for
 longer than `--upload-timeout` (default 1 h) together with their files.
-Finalization removes the session from the map and takes ownership of the
-data, which it exposes as an `io.ReadSeeker` that also implements
-`io.ReaderAt` (`*bytes.Reader` or `*os.File`), so comp-prysm can search
-candidates in parallel.
+Finalization takes a snapshot of the session's data as an `io.ReadSeeker`
+that also implements `io.ReaderAt` (`*bytes.Reader`, or a section reader over
+the spilled file), so comp-prysm can search candidates in parallel. The
+session stays registered until the blob is published, so a `500` during
+finalization leaves it in place for the client to retry the `PUT`; success
+removes the session and its file.
 
 ### Blob finalization (`blob.Store.Put`)
 
@@ -303,8 +304,9 @@ body has been appended, and on a monolithic `POST ?digest=`.
    downgrades the blob to raw with reason `roundtrip-failed`. This makes a
    pull-time failure possible only through compressor drift after an
    upgrade, never through an ingest bug.
-9. **Root and publish.** Build the blob root (`WriteBatch`, one fsync),
-   publish `oci/blob/<digest>`, record the stats in the recent-uploads table,
+9. **Root and publish.** Build `meta.json` and the blob root through a second,
+   small accounting writer whose stats are not counted, publish
+   `oci/blob/<digest>`, record the stats in the recent-uploads table,
    log the blob line, delete the spool file, answer `201` with `Location:
    /v2/<name>/blobs/<digest>` and `Docker-Content-Digest`.
 
@@ -317,7 +319,9 @@ the second one hits the whole-blob dedup check.
 
 1. Read the body with a 4 MiB cap (`413`). Compute the sha256. When the
    reference is a digest it must match (`400 DIGEST_INVALID`). The tag, when
-   the reference is a tag, must match the tag grammar (`400 TAG_INVALID`).
+   the reference is a tag, must match the tag grammar (`400 MANIFEST_INVALID`
+   with the message prefix `invalid tag`; the standard code list has no
+   tag-specific code).
 2. Parse the body only for validation and to collect descriptors:
    `schemaVersion`, `mediaType`, `config`, `layers`, `manifests`, `subject`,
    `artifactType`, `annotations`. Invalid JSON or a schema version other than
@@ -478,7 +482,9 @@ image pushed repo=library/app reference=v1 digest=sha256:… kind=manifest blobs
 ```
 
 Byte counts are raw integers so the lines are machine friendly. The same
-numbers are stored in the image's `meta.json`.
+numbers are stored in the image's `meta.json`. Both lines may carry extra
+keys (`raw_reason` on raw blob lines, `manifests` on index lines, `duration`
+on both); the keys listed above are the guaranteed minimum.
 
 `diskBytes` is approximate under concurrent uploads that share chunks (both
 may see a key as absent); the stored bytes are correct because
@@ -609,8 +615,9 @@ and source; oci-amber then requires that version.
   `dedupedBytes` above 90 % of its logical bytes and `diskBytes` well below
   its size. Push the same layer twice; assert the second is skipped.
 - **HTTP conformance** with `httptest.Server`: scripted push and pull the way
-  containerd (POST, PATCH with `Content-Range`, PUT) and podman (POST, single
-  PATCH, empty PUT) do it, HEAD before PUT, monolithic POST, mount hit and
+  containerd (POST, then one PUT carrying the whole body), ggcr and buildkit
+  (POST, PATCH with `Content-Range`, PUT) and podman (POST, single PATCH,
+  empty PUT) do it, HEAD before PUT, monolithic POST, mount hit and
   mount fallback, manifest by tag and by digest, an image index with two
   children, tag listing with pagination and `Link`, referrers with and
   without `artifactType` filter, catalog, deletes, and the error envelope
