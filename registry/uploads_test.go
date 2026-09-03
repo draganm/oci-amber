@@ -2,13 +2,17 @@ package registry
 
 import (
 	"bytes"
+	"context"
+	"io"
 	"io/fs"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/draganm/oci-amber/oci"
 )
@@ -340,5 +344,110 @@ func TestUploadRangeHeader(t *testing.T) {
 		if got := uploadRange(offset); got != want {
 			t.Errorf("uploadRange(%d) = %q, want %q", offset, got, want)
 		}
+	}
+}
+
+// sessionLocks reports how many per-session locks the server is holding.
+// Nothing may be retained once the requests touching a session are done,
+// including the requests of a client that walked away mid-upload.
+func (e *testEnv) sessionLocks() int { return e.server.sessLocks.Len() }
+
+// waitFor polls cond until it holds or the deadline passes.
+func waitFor(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %s", what)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+func TestSessionLocksAreReleased(t *testing.T) {
+	e := newTestEnv(t)
+
+	// A client that opens a session, sends one chunk and never comes back
+	// must not leave a lock behind: nothing sweeps this map.
+	abandoned, _ := e.startUpload(t, repo)
+	resp := e.do(t, http.MethodPatch, abandoned, []byte("0123456789"), nil)
+	assertStatus(t, resp, http.StatusAccepted)
+	if n := e.sessionLocks(); n != 0 {
+		t.Fatalf("%d session locks left by an abandoned upload, want 0", n)
+	}
+
+	// The full POST/PATCH/GET/DELETE sequence leaves nothing either.
+	loc, _ := e.startUpload(t, repo)
+	resp = e.do(t, http.MethodPatch, loc, []byte("0123456789"), nil)
+	assertStatus(t, resp, http.StatusAccepted)
+	resp = e.do(t, http.MethodGet, loc, nil, nil)
+	assertStatus(t, resp, http.StatusNoContent)
+	resp = e.do(t, http.MethodDelete, loc, nil, nil)
+	assertStatus(t, resp, http.StatusNoContent)
+	if n := e.sessionLocks(); n != 0 {
+		t.Fatalf("%d session locks left after POST/PATCH/GET/DELETE, want 0", n)
+	}
+
+	// A PUT that fails with 400 keeps the session for a retry but not its
+	// lock, and an unknown session id must not create one at all.
+	loc, _ = e.startUpload(t, repo)
+	resp = e.do(t, http.MethodPatch, loc, rawFixture(), nil)
+	assertStatus(t, resp, http.StatusAccepted)
+	resp = e.do(t, http.MethodPut, loc, nil, nil)
+	assertErrorCode(t, resp, http.StatusBadRequest, oci.CodeDigestInvalid)
+	resp = e.do(t, http.MethodGet, loc, nil, nil)
+	assertStatus(t, resp, http.StatusNoContent)
+	if n := e.sessionLocks(); n != 0 {
+		t.Fatalf("%d session locks left after a failed PUT, want 0", n)
+	}
+
+	resp = e.do(t, http.MethodGet, "/v2/"+repo+"/blobs/uploads/deadbeef", nil, nil)
+	assertErrorCode(t, resp, http.StatusNotFound, oci.CodeBlobUploadUnknown)
+	if n := e.sessionLocks(); n != 0 {
+		t.Fatalf("%d session locks left by an unknown session id, want 0", n)
+	}
+}
+
+func TestPatchClientDisconnectLogsDebug(t *testing.T) {
+	// A client that walks away mid-PATCH (Ctrl-C during a push) is a client
+	// fault, not a server failure: it must not reach the error log.
+	e := newTestEnv(t)
+	loc, _ := e.startUpload(t, repo)
+
+	pr, pw := io.Pipe()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPatch, e.srv.URL+loc, pr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.ContentLength = -1 // chunked: the body ends when the client says so
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		resp, err := e.client.Do(req)
+		if err == nil {
+			resp.Body.Close()
+		}
+	}()
+
+	if _, err := pw.Write([]byte("0123456789")); err != nil {
+		t.Fatalf("writing the first chunk: %v", err)
+	}
+	// The handler has the session locked: the request is in flight, blocked
+	// reading the rest of a body that will never arrive.
+	waitFor(t, "the PATCH handler to take the session lock", func() bool { return e.sessionLocks() == 1 })
+
+	cancel()
+	pw.CloseWithError(io.ErrUnexpectedEOF)
+	<-done
+	// The handler releases the lock as it returns.
+	waitFor(t, "the PATCH handler to return", func() bool { return e.sessionLocks() == 0 })
+
+	if recs := e.records.atLeast(slog.LevelError); len(recs) != 0 {
+		for _, r := range recs {
+			t.Errorf("client disconnect logged at %s: %q", r.Level, r.Message)
+		}
+		t.Fatalf("%d error-level records emitted for a client disconnect, want 0", len(recs))
 	}
 }

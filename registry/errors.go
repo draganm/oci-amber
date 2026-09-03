@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
@@ -74,11 +76,32 @@ func (s *server) handleError(w http.ResponseWriter, r *http.Request, err error) 
 	case errors.Is(err, upload.ErrUnknown):
 		writeError(w, oci.NewError(oci.CodeBlobUploadUnknown, "blob upload unknown to registry"))
 	default:
-		level := slog.LevelError
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			level = slog.LevelDebug
+		if isClientGone(r, err) {
+			s.log.Debug("request abandoned by the client", "method", r.Method, "path", r.URL.Path, "error", err)
+			if r.Context().Err() != nil {
+				// Nobody is left to read a response.
+				return
+			}
+			writeEmptyErrors(w, http.StatusInternalServerError)
+			return
 		}
-		s.log.Log(r.Context(), level, "request failed", "method", r.Method, "path", r.URL.Path, "error", err)
+		s.log.Log(r.Context(), slog.LevelError, "request failed", "method", r.Method, "path", r.URL.Path, "error", err)
 		writeEmptyErrors(w, http.StatusInternalServerError)
 	}
+}
+
+// isClientGone reports whether err is the peer walking away rather than a
+// server fault. A Ctrl-C in the middle of a push cancels the request
+// context, but a body read can also fail first: a truncated chunked body
+// surfaces as io.ErrUnexpectedEOF and a reset connection as a net.Error.
+// None of these deserve the error log or an operator's attention.
+func isClientGone(r *http.Request, err error) bool {
+	if r != nil && r.Context().Err() != nil {
+		return true
+	}
+	var nerr net.Error
+	return errors.Is(err, context.Canceled) ||
+		errors.Is(err, context.DeadlineExceeded) ||
+		errors.Is(err, io.ErrUnexpectedEOF) ||
+		errors.As(err, &nerr)
 }

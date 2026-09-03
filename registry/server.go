@@ -9,11 +9,11 @@ import (
 	"regexp"
 	"runtime/debug"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/draganm/oci-amber/blob"
 	"github.com/draganm/oci-amber/image"
+	"github.com/draganm/oci-amber/keyedmutex"
 	"github.com/draganm/oci-amber/oci"
 	"github.com/draganm/oci-amber/upload"
 )
@@ -32,18 +32,28 @@ type server struct {
 	log     *slog.Logger
 
 	// sessLocks serialises the requests that touch one upload session
-	// (PATCH, PUT, GET and DELETE on the same id). Keyed by session id.
-	sessLocks sync.Map
+	// (PATCH, PUT, GET and DELETE on the same id). Its rows are refcounted
+	// and dropped as soon as the last holder releases, so a client that
+	// opens a session and disappears leaves nothing behind: no sweeper
+	// reaches into this map.
+	sessLocks keyedmutex.Mutex[string]
 }
 
 // New returns the registry's HTTP handler. Panics in handlers are recovered
 // into a 500 with an empty errors list.
 func New(blobs *blob.Store, images *image.Store, uploads *upload.Manager, log *slog.Logger) http.Handler {
+	s := newServer(blobs, images, uploads, log)
+	return withRecovery(s.log, s)
+}
+
+// newServer builds the server New wraps. It is separate from New so the
+// package's own tests can reach the server's state (its session locks)
+// while still serving through the same recovery wrapper.
+func newServer(blobs *blob.Store, images *image.Store, uploads *upload.Manager, log *slog.Logger) *server {
 	if log == nil {
 		log = slog.Default()
 	}
-	s := &server{blobs: blobs, images: images, uploads: uploads, log: log}
-	return withRecovery(log, s)
+	return &server{blobs: blobs, images: images, uploads: uploads, log: log}
 }
 
 // route is a parsed /v2/<name>/<kind>/<rest> path. kind is one of "blobs",

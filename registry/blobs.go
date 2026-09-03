@@ -90,8 +90,8 @@ func (s *server) serveBlob(w http.ResponseWriter, r *http.Request, d oci.Digest,
 		bw.finish()
 		return
 	}
-	if ctx.Err() != nil {
-		s.log.Debug("blob pull cancelled by client", "digest", d, "written", bw.n, "error", err)
+	if isClientGone(r, err) {
+		s.log.Debug("blob pull abandoned by the client", "digest", d, "written", bw.n, "error", err)
 		return
 	}
 	if !bw.started {

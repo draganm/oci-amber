@@ -6,7 +6,6 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
-	"sync"
 
 	"github.com/draganm/oci-amber/oci"
 	"github.com/draganm/oci-amber/upload"
@@ -33,20 +32,10 @@ func setUploadHeaders(w http.ResponseWriter, name string, sess *upload.Session) 
 	h.Set("Range", uploadRange(sess.Offset()))
 }
 
-// lockSession serialises the requests that touch one session, so an
-// overlapping PATCH and PUT see a consistent offset. The returned function
-// releases the lock.
-func (s *server) lockSession(id string) func() {
-	v, _ := s.sessLocks.LoadOrStore(id, &sync.Mutex{})
-	mu := v.(*sync.Mutex)
-	mu.Lock()
-	return mu.Unlock
-}
-
-// discardSession drops a session and its lock. A session that is already
-// gone (swept, or cancelled concurrently) is not an error.
+// discardSession drops a session. A session that is already gone (swept,
+// or cancelled concurrently) is not an error. The session's lock is not
+// touched here: its holder releases it on the way out.
 func (s *server) discardSession(id string) {
-	s.sessLocks.Delete(id)
 	if err := s.uploads.Remove(id); err != nil && !errors.Is(err, upload.ErrUnknown) {
 		s.log.Warn("removing upload session", "id", id, "error", err)
 	}
@@ -139,11 +128,10 @@ func (s *server) startUpload(w http.ResponseWriter, r *http.Request, name string
 // patchUpload appends the body to the session. A Content-Range, when sent,
 // must start at the current offset.
 func (s *server) patchUpload(w http.ResponseWriter, r *http.Request, name, id string) {
-	unlock := s.lockSession(id)
+	unlock := s.sessLocks.Lock(id)
 	defer unlock()
 	sess, err := s.uploads.Get(id)
 	if err != nil {
-		s.sessLocks.Delete(id)
 		s.handleError(w, r, err)
 		return
 	}
@@ -170,11 +158,10 @@ func (s *server) patchUpload(w http.ResponseWriter, r *http.Request, name, id st
 
 // putUpload appends the optional body and finalizes the session.
 func (s *server) putUpload(w http.ResponseWriter, r *http.Request, name, id string) {
-	unlock := s.lockSession(id)
+	unlock := s.sessLocks.Lock(id)
 	defer unlock()
 	sess, err := s.uploads.Get(id)
 	if err != nil {
-		s.sessLocks.Delete(id)
 		s.handleError(w, r, err)
 		return
 	}
@@ -237,11 +224,10 @@ func (s *server) finalize(w http.ResponseWriter, r *http.Request, name string, s
 
 // uploadStatus handles GET: the current offset of a session.
 func (s *server) uploadStatus(w http.ResponseWriter, r *http.Request, name, id string) {
-	unlock := s.lockSession(id)
+	unlock := s.sessLocks.Lock(id)
 	defer unlock()
 	sess, err := s.uploads.Get(id)
 	if err != nil {
-		s.sessLocks.Delete(id)
 		s.handleError(w, r, err)
 		return
 	}
@@ -251,10 +237,9 @@ func (s *server) uploadStatus(w http.ResponseWriter, r *http.Request, name, id s
 
 // cancelUpload handles DELETE: drops the session and its spilled file.
 func (s *server) cancelUpload(w http.ResponseWriter, r *http.Request, id string) {
-	unlock := s.lockSession(id)
+	unlock := s.sessLocks.Lock(id)
 	defer unlock()
 	err := s.uploads.Remove(id)
-	s.sessLocks.Delete(id)
 	if err != nil {
 		s.handleError(w, r, err)
 		return

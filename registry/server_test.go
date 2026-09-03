@@ -2,6 +2,7 @@ package registry
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -26,16 +28,71 @@ import (
 // temporary directory.
 type testEnv struct {
 	srv       *httptest.Server
+	server    *server
 	blobs     *blob.Store
+	images    *image.Store
 	uploads   *upload.Manager
 	uploadDir string
 	client    *http.Client
+	log       *slog.Logger
+	records   *recorder
+}
+
+// recorder keeps every log record the registry emits so a test can assert
+// on the level a code path logs at. It tees to the test's own log.
+type recorder struct {
+	mu   sync.Mutex
+	recs []slog.Record
+}
+
+func (rc *recorder) add(r slog.Record) {
+	rc.mu.Lock()
+	defer rc.mu.Unlock()
+	rc.recs = append(rc.recs, r.Clone())
+}
+
+// atLeast returns the recorded records of the given level or higher.
+func (rc *recorder) atLeast(level slog.Level) []slog.Record {
+	rc.mu.Lock()
+	defer rc.mu.Unlock()
+	var out []slog.Record
+	for _, r := range rc.recs {
+		if r.Level >= level {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+// capturingHandler feeds every record to a recorder and then to the wrapped
+// handler. Derived handlers keep capturing, so records logged through
+// Logger.With are recorded too.
+type capturingHandler struct {
+	slog.Handler
+	rc *recorder
+}
+
+func (h capturingHandler) Handle(ctx context.Context, r slog.Record) error {
+	h.rc.add(r)
+	return h.Handler.Handle(ctx, r)
+}
+
+func (h capturingHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
+	return capturingHandler{Handler: h.Handler.WithAttrs(attrs), rc: h.rc}
+}
+
+func (h capturingHandler) WithGroup(name string) slog.Handler {
+	return capturingHandler{Handler: h.Handler.WithGroup(name), rc: h.rc}
 }
 
 func newTestEnv(t *testing.T) *testEnv {
 	t.Helper()
 	dir := t.TempDir()
-	log := slog.New(slog.NewTextHandler(t.Output(), &slog.HandlerOptions{Level: slog.LevelDebug}))
+	rc := &recorder{}
+	log := slog.New(capturingHandler{
+		Handler: slog.NewTextHandler(t.Output(), &slog.HandlerOptions{Level: slog.LevelDebug}),
+		rc:      rc,
+	})
 	st, err := store.Open(filepath.Join(dir, "store"), store.Options{Logger: log})
 	if err != nil {
 		t.Fatalf("store.Open: %v", err)
@@ -64,9 +121,23 @@ func newTestEnv(t *testing.T) *testEnv {
 	}
 	t.Cleanup(func() { uploads.Close() })
 	images := image.New(st, blobs, log)
-	srv := httptest.NewServer(New(blobs, images, uploads, log))
+	// The handler is assembled exactly as New does it, in two steps, so the
+	// tests can reach the server's own state; TestNewWrapsTheServer covers
+	// New itself.
+	s := newServer(blobs, images, uploads, log)
+	srv := httptest.NewServer(withRecovery(log, s))
 	t.Cleanup(srv.Close)
-	return &testEnv{srv: srv, blobs: blobs, uploads: uploads, uploadDir: uploadDir, client: srv.Client()}
+	return &testEnv{
+		srv:       srv,
+		server:    s,
+		blobs:     blobs,
+		images:    images,
+		uploads:   uploads,
+		uploadDir: uploadDir,
+		client:    srv.Client(),
+		log:       log,
+		records:   rc,
+	}
 }
 
 // response is an http.Response whose body has been read.
@@ -310,5 +381,20 @@ func TestPanicInHandlerThroughServer(t *testing.T) {
 	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusInternalServerError || strings.TrimSpace(string(body)) != `{"errors":[]}` {
 		t.Fatalf("status %d body %q", resp.StatusCode, body)
+	}
+}
+
+func TestNewWrapsTheServer(t *testing.T) {
+	// New is the exported entry point: it wires the server behind the
+	// recovery wrapper, so the handler it returns answers the base endpoint.
+	e := newTestEnv(t)
+	h := New(e.blobs, e.images, e.uploads, e.log)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v2/", nil))
+	if rec.Code != http.StatusOK || rec.Body.String() != "{}" {
+		t.Fatalf("New handler: status %d body %q", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get(apiVersionHeader); got != apiVersionValue {
+		t.Fatalf("New handler: %s = %q, want %q", apiVersionHeader, got, apiVersionValue)
 	}
 }

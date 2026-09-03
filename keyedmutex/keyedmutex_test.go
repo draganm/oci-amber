@@ -6,13 +6,6 @@ import (
 	"time"
 )
 
-// entries reports how many rows the mutex is currently holding.
-func entries[K comparable](m *Mutex[K]) int {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return len(m.locks)
-}
-
 func TestSameKeySerializes(t *testing.T) {
 	var km Mutex[string]
 	unlock := km.Lock("a")
@@ -69,7 +62,7 @@ func TestSameKeyOrdersCriticalSections(t *testing.T) {
 	if counter != 1000 {
 		t.Fatalf("counter = %d, want 1000", counter)
 	}
-	if n := entries(&km); n != 0 {
+	if n := km.Len(); n != 0 {
 		t.Fatalf("%d entries left after every holder released", n)
 	}
 }
@@ -106,15 +99,15 @@ func TestDifferentKeysDoNotBlock(t *testing.T) {
 
 func TestEntryDroppedAfterUnlock(t *testing.T) {
 	var km Mutex[string]
-	if n := entries(&km); n != 0 {
+	if n := km.Len(); n != 0 {
 		t.Fatalf("zero value has %d entries, want 0", n)
 	}
 	unlock := km.Lock("a")
-	if n := entries(&km); n != 1 {
+	if n := km.Len(); n != 1 {
 		t.Fatalf("entries while held = %d, want 1", n)
 	}
 	unlock()
-	if n := entries(&km); n != 0 {
+	if n := km.Len(); n != 0 {
 		t.Fatalf("entries after unlock = %d, want 0", n)
 	}
 
@@ -125,19 +118,19 @@ func TestEntryDroppedAfterUnlock(t *testing.T) {
 	go func() { waiting <- km.Lock("a") }()
 	// Give the waiter time to register its reference.
 	deadline := time.Now().Add(time.Second)
-	for entries(&km) != 1 && time.Now().Before(deadline) {
+	for km.Len() != 1 && time.Now().Before(deadline) {
 		time.Sleep(time.Millisecond)
 	}
-	if n := entries(&km); n != 1 {
+	if n := km.Len(); n != 1 {
 		t.Fatalf("entries with a holder and a waiter = %d, want 1", n)
 	}
 	held()
 	second := <-waiting
-	if n := entries(&km); n != 1 {
+	if n := km.Len(); n != 1 {
 		t.Fatalf("entries while the second holder runs = %d, want 1", n)
 	}
 	second()
-	if n := entries(&km); n != 0 {
+	if n := km.Len(); n != 0 {
 		t.Fatalf("entries after the last holder released = %d, want 0", n)
 	}
 
@@ -146,13 +139,13 @@ func TestEntryDroppedAfterUnlock(t *testing.T) {
 	for i := range 100 {
 		unlocks = append(unlocks, km.Lock(string(rune('a'+i%26))+string(rune('a'+i/26))))
 	}
-	if n := entries(&km); n != 100 {
+	if n := km.Len(); n != 100 {
 		t.Fatalf("entries with 100 keys held = %d, want 100", n)
 	}
 	for _, u := range unlocks {
 		u()
 	}
-	if n := entries(&km); n != 0 {
+	if n := km.Len(); n != 0 {
 		t.Fatalf("entries after releasing 100 keys = %d, want 0", n)
 	}
 }
@@ -172,7 +165,7 @@ func TestUnlockTwicePanics(t *testing.T) {
 		// The key is still usable after the misuse.
 		u := km.Lock("a")
 		u()
-		if n := entries(&km); n != 0 {
+		if n := km.Len(); n != 0 {
 			t.Fatalf("entries after recovery = %d, want 0", n)
 		}
 	}()
@@ -200,7 +193,27 @@ func TestConcurrentKeys(t *testing.T) {
 			t.Errorf("key %d counted %d, want 50", i, c)
 		}
 	}
-	if n := entries(&km); n != 0 {
+	if n := km.Len(); n != 0 {
 		t.Fatalf("%d entries left, want 0", n)
+	}
+}
+
+func TestLen(t *testing.T) {
+	var km Mutex[string]
+	if n := km.Len(); n != 0 {
+		t.Fatalf("Len of the zero value = %d, want 0", n)
+	}
+	a := km.Lock("a")
+	b := km.Lock("b")
+	if n := km.Len(); n != 2 {
+		t.Fatalf("Len with two keys held = %d, want 2", n)
+	}
+	a()
+	if n := km.Len(); n != 1 {
+		t.Fatalf("Len after releasing one key = %d, want 1", n)
+	}
+	b()
+	if n := km.Len(); n != 0 {
+		t.Fatalf("Len after releasing every key = %d, want 0", n)
 	}
 }

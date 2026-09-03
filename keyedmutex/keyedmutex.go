@@ -60,3 +60,13 @@ func (m *Mutex[K]) Lock(k K) (unlock func()) {
 		m.mu.Unlock()
 	}
 }
+
+// Len reports how many keys the mutex is currently holding: the number of
+// keys held or awaited right now, never the number of keys ever seen. It
+// exists so callers that keep a Mutex as their only per-key state can
+// assert in tests that nothing is retained after the work is done.
+func (m *Mutex[K]) Len() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.locks)
+}
