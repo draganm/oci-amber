@@ -93,15 +93,23 @@ func (s *server) handleError(w http.ResponseWriter, r *http.Request, err error) 
 // isClientGone reports whether err is the peer walking away rather than a
 // server fault. A Ctrl-C in the middle of a push cancels the request
 // context, but a body read can also fail first: a truncated chunked body
-// surfaces as io.ErrUnexpectedEOF and a reset connection as a net.Error.
+// surfaces as io.ErrUnexpectedEOF and a reset connection as a *net.OpError.
 // None of these deserve the error log or an operator's attention.
+//
+// The match is against *net.OpError, the concrete type the net package
+// returns for a failed connection, and deliberately not against the
+// net.Error interface: syscall.Errno declares both Timeout() and
+// Temporary(), so it satisfies net.Error, and every local filesystem error
+// wraps one. Matching the interface would classify a full disk, an EACCES
+// or a missing upload spool as a client disconnect and hide real server
+// faults from the error log.
 func isClientGone(r *http.Request, err error) bool {
 	if r != nil && r.Context().Err() != nil {
 		return true
 	}
-	var nerr net.Error
+	var operr *net.OpError
 	return errors.Is(err, context.Canceled) ||
 		errors.Is(err, context.DeadlineExceeded) ||
 		errors.Is(err, io.ErrUnexpectedEOF) ||
-		errors.As(err, &nerr)
+		errors.As(err, &operr)
 }

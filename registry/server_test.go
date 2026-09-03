@@ -8,12 +8,14 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -317,6 +319,80 @@ func TestHandleErrorMapping(t *testing.T) {
 	resp := &response{Response: rec.Result(), body: rec.Body.Bytes()}
 	resp.Request = req
 	assertEmptyErrors(t, resp, http.StatusInternalServerError)
+}
+
+// TestIsClientGoneIgnoresSyscallErrno pins the distinction between a peer
+// that walked away and a server-side I/O failure. syscall.Errno declares
+// both Timeout() and Temporary(), so it satisfies the net.Error interface
+// and every local filesystem error wraps one: matching that interface would
+// file a full disk or a missing upload spool as a client disconnect and keep
+// real faults out of the error log.
+func TestIsClientGoneIgnoresSyscallErrno(t *testing.T) {
+	live := httptest.NewRequest(http.MethodPut, "/v2/x/blobs/uploads/abc", nil)
+
+	cancelled := httptest.NewRequest(http.MethodPut, "/v2/x/blobs/uploads/abc", nil)
+	ctx, cancel := context.WithCancel(cancelled.Context())
+	cancel()
+	cancelled = cancelled.WithContext(ctx)
+
+	opErr := &net.OpError{Op: "read", Net: "tcp", Err: syscall.ECONNRESET}
+
+	for _, c := range []struct {
+		name string
+		req  *http.Request
+		err  error
+		want bool
+	}{
+		// Server faults: a live request whose error is a local syscall.
+		{"ENOENT on the upload spool", live, fmt.Errorf("blob: opening spool: %w", &os.PathError{Op: "open", Path: "/w/uploads/abc", Err: syscall.ENOENT}), false},
+		{"EIO from the store", live, fmt.Errorf("store: appending: %w", &os.PathError{Op: "write", Path: "/s/pack.0", Err: syscall.EIO}), false},
+		{"bare ENOENT", live, syscall.ENOENT, false},
+		{"bare EIO", live, syscall.EIO, false},
+		{"a plain internal error", live, errors.New("disk on fire"), false},
+		// Client faults.
+		{"a reset connection", live, fmt.Errorf("reading body: %w", opErr), true},
+		{"a bare *net.OpError", live, opErr, true},
+		{"a truncated chunked body", live, fmt.Errorf("reading body: %w", io.ErrUnexpectedEOF), true},
+		{"a cancelled context in the error", live, fmt.Errorf("reading body: %w", context.Canceled), true},
+		{"an exceeded deadline in the error", live, fmt.Errorf("reading body: %w", context.DeadlineExceeded), true},
+		// A cancelled request wins regardless of the error, including one
+		// that would otherwise read as a server fault.
+		{"a cancelled request with a syscall error", cancelled, fmt.Errorf("blob: opening spool: %w", syscall.ENOENT), true},
+		{"a cancelled request with an internal error", cancelled, errors.New("disk on fire"), true},
+	} {
+		if got := isClientGone(c.req, c.err); got != c.want {
+			t.Errorf("isClientGone(%s) = %v, want %v (error: %v)", c.name, got, c.want, c.err)
+		}
+	}
+
+	// The consequence that matters: handleError logs a server-side I/O
+	// failure at Error level, and a client disconnect below it.
+	for _, c := range []struct {
+		name      string
+		err       error
+		wantError bool
+	}{
+		{"ENOENT on the upload spool", fmt.Errorf("blob: opening spool: %w", &os.PathError{Op: "open", Path: "/w/uploads/abc", Err: syscall.ENOENT}), true},
+		{"a reset connection", fmt.Errorf("reading body: %w", opErr), false},
+	} {
+		rc := &recorder{}
+		s := &server{log: slog.New(capturingHandler{Handler: slog.NewTextHandler(io.Discard, nil), rc: rc})}
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPut, "/v2/x/blobs/uploads/abc", nil)
+		s.handleError(rec, req, c.err)
+
+		resp := &response{Response: rec.Result(), body: rec.Body.Bytes()}
+		resp.Request = req
+		assertEmptyErrors(t, resp, http.StatusInternalServerError)
+
+		errs := rc.atLeast(slog.LevelError)
+		if got := len(errs) > 0; got != c.wantError {
+			t.Errorf("%s: error-level records = %d, want any = %v", c.name, len(errs), c.wantError)
+		}
+		if c.wantError && len(errs) > 0 && errs[0].Message != "request failed" {
+			t.Errorf("%s: error record message = %q, want \"request failed\"", c.name, errs[0].Message)
+		}
+	}
 }
 
 func TestWithRecovery(t *testing.T) {
