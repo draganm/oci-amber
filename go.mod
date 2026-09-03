@@ -2,7 +2,10 @@ module github.com/draganm/oci-amber
 
 go 1.26.6
 
-require github.com/jobs-build/amber-store-core v0.0.3-0.20260827084116-2d22eef35a31
+require (
+	github.com/draganm/comp-prysm v0.1.0
+	github.com/jobs-build/amber-store-core v0.0.3-0.20260827084116-2d22eef35a31
+)
 
 require (
 	github.com/DataDog/zstd v1.5.7 // indirect
@@ -20,7 +23,6 @@ require (
 	github.com/cockroachdb/swiss v0.0.0-20251224182025-b0f6560f979b // indirect
 	github.com/cockroachdb/tokenbucket v0.0.0-20230807174530-cc333fc44b06 // indirect
 	github.com/cpuguy83/go-md2man/v2 v2.0.7 // indirect
-	github.com/draganm/comp-prysm v0.1.0 // indirect
 	github.com/fxamacker/cbor/v2 v2.9.2 // indirect
 	github.com/getsentry/sentry-go v0.27.0 // indirect
 	github.com/go-git/gcfg v1.5.1-0.20230307220236-3a3c6141e376 // indirect
