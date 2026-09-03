@@ -142,20 +142,31 @@ func (m *Manager) Get(id string) (*Session, error) {
 	return s, nil
 }
 
-// Remove unregisters the session and deletes its file. It returns
-// ErrUnknown when there is no such session.
+// Remove unregisters the session and deletes its file, closing the file
+// before forgetting the session, the same ordering Sweep uses. It returns
+// ErrUnknown when there is no such session. If removing the file fails,
+// the session stays registered (unusable for Append and Spool, since
+// close already marks it closed) so a later Remove, or Sweep once it goes
+// idle, can retry; the error is returned to the caller either way.
 func (m *Manager) Remove(id string) error {
 	m.mu.Lock()
 	s, ok := m.sessions[id]
-	if ok {
-		delete(m.sessions, id)
-	}
 	m.mu.Unlock()
 	if !ok {
 		return ErrUnknown
 	}
-	m.log.Debug("upload session removed", "id", id, "size", s.Offset())
-	return s.close()
+	size := s.Offset()
+	if err := s.close(); err != nil {
+		m.log.Error("removing upload session", "id", id, "path", s.path, "error", err)
+		return err
+	}
+	m.mu.Lock()
+	if m.sessions[id] == s {
+		delete(m.sessions, id)
+	}
+	m.mu.Unlock()
+	m.log.Debug("upload session removed", "id", id, "size", size)
+	return nil
 }
 
 // Sweep removes every session whose last activity is more than the timeout
@@ -175,7 +186,7 @@ func (m *Manager) Sweep(now time.Time) int {
 	for _, s := range expired {
 		size := s.Offset()
 		if err := s.close(); err != nil {
-			m.log.Error("removing expired upload session", "id", s.ID, "error", err)
+			m.log.Error("removing expired upload session", "id", s.ID, "path", s.path, "error", err)
 			continue
 		}
 		m.log.Info("upload session expired", "id", s.ID, "size", size)
@@ -188,9 +199,16 @@ func (m *Manager) Sweep(now time.Time) int {
 	return len(expired)
 }
 
-// Close stops the sweeper and removes every session and its file, closing
-// each file before forgetting its session, same as Sweep. Create fails
-// afterwards. Close is idempotent.
+// Close stops the sweeper, attempts to remove every session's file and
+// forgets every session. Unlike Sweep and Remove, Close drops a session
+// from the map even when removing its file failed: Close is terminal, so
+// the map is unreachable to any other caller once it returns regardless,
+// and there is no later Sweep or Remove that could retry. Instead, each
+// removal failure is logged at error level together with the session's
+// path and returned (joined with any others) from Close, so a caller such
+// as process shutdown can report or act on files left behind. Create
+// fails afterwards. Close is idempotent: a second call does no work and
+// returns nil, even if the first call reported errors.
 func (m *Manager) Close() error {
 	m.mu.Lock()
 	if m.closed {
@@ -208,6 +226,7 @@ func (m *Manager) Close() error {
 	var errs []error
 	for _, s := range sessions {
 		if err := s.close(); err != nil {
+			m.log.Error("removing upload session file", "id", s.ID, "path", s.path, "error", err)
 			errs = append(errs, err)
 		}
 		m.mu.Lock()

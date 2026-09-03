@@ -329,6 +329,53 @@ poll:
 	}
 }
 
+// TestSweepRetriesFailedRemoval is a regression test for the case where
+// removing an expired session's file fails: the session must stay
+// registered (with its file still on disk) rather than being forgotten
+// with the file left behind, and a later Sweep must retry the removal and
+// succeed once the underlying failure clears.
+func TestSweepRetriesFailedRemoval(t *testing.T) {
+	m, dir := newTestManager(t, 16, time.Hour)
+	s, err := m.Create()
+	if err != nil {
+		t.Fatal(err)
+	}
+	appendBytes(t, s, pattern(100, 1))
+	setLastActive(s, time.Now().Add(-2*time.Hour))
+
+	injected := errors.New("injected removal failure")
+	failNext := true
+	orig := removeFile
+	removeFile = func(path string) error {
+		if failNext {
+			failNext = false
+			return injected
+		}
+		return orig(path)
+	}
+	t.Cleanup(func() { removeFile = orig })
+
+	if n := m.Sweep(time.Now()); n != 1 {
+		t.Fatalf("first Sweep returned %d, want 1", n)
+	}
+	if sessionCount(m) != 1 {
+		t.Fatalf("session count after a failed removal = %d, want 1 (session must stay registered)", sessionCount(m))
+	}
+	if names := dirNames(t, dir); len(names) != 1 {
+		t.Fatalf("dir entries after a failed removal = %v, want the file still present", names)
+	}
+
+	if n := m.Sweep(time.Now()); n != 1 {
+		t.Fatalf("second Sweep returned %d, want 1", n)
+	}
+	if sessionCount(m) != 0 {
+		t.Fatalf("session count after the retried removal = %d, want 0", sessionCount(m))
+	}
+	if names := dirNames(t, dir); len(names) != 0 {
+		t.Fatalf("dir entries after the retried removal = %v, want none", names)
+	}
+}
+
 func TestManagerCloseRemovesAll(t *testing.T) {
 	m, dir := newTestManager(t, 16, time.Hour)
 	spilled, err := m.Create()
@@ -361,6 +408,63 @@ func TestManagerCloseRemovesAll(t *testing.T) {
 	}
 	if err := m.Close(); err != nil {
 		t.Fatalf("second Close: %v", err)
+	}
+}
+
+// TestCloseReportsRemovalFailure verifies that, unlike Sweep and Remove,
+// Close drops a session from the map even when removing its file fails
+// (there is no later retry once the manager is closed), but it logs the
+// failure at error level with the session's path and returns a non-nil
+// error, and it stays idempotent afterwards.
+func TestCloseReportsRemovalFailure(t *testing.T) {
+	dir := t.TempDir()
+	var logs bytes.Buffer
+	m := &Manager{
+		dir:         dir,
+		maxInMemory: 16,
+		timeout:     time.Hour,
+		log:         slog.New(slog.NewTextHandler(&logs, nil)),
+		sessions:    map[string]*Session{},
+		stop:        make(chan struct{}),
+		done:        make(chan struct{}),
+	}
+	// Started with a long interval so it never fires during the test; only
+	// needed so close(m.stop)/<-m.done in Close has a sweeper to shut down.
+	go m.sweeper(time.Minute)
+
+	s, err := m.Create()
+	if err != nil {
+		t.Fatal(err)
+	}
+	appendBytes(t, s, pattern(100, 1))
+
+	injected := errors.New("injected removal failure")
+	orig := removeFile
+	removeFile = func(string) error { return injected }
+	t.Cleanup(func() { removeFile = orig })
+
+	err = m.Close()
+	if err == nil {
+		t.Fatal("Close with a permanently failing removal returned nil, want an error")
+	}
+	if !errors.Is(err, injected) {
+		t.Fatalf("Close error = %v, want it to wrap %v", err, injected)
+	}
+	if !strings.Contains(logs.String(), "level=ERROR") {
+		t.Fatalf("Close did not log the removal failure at error level: %q", logs.String())
+	}
+	if !strings.Contains(logs.String(), s.path) {
+		t.Fatalf("Close's error log did not mention the file path %q: %q", s.path, logs.String())
+	}
+	if names := dirNames(t, dir); len(names) != 1 {
+		t.Fatalf("dir entries after a failed Close = %v, want the file still present", names)
+	}
+	if sessionCount(m) != 0 {
+		t.Fatalf("session count after Close = %d, want 0 (Close forgets sessions regardless)", sessionCount(m))
+	}
+
+	if err := m.Close(); err != nil {
+		t.Fatalf("second Close = %v, want nil", err)
 	}
 }
 

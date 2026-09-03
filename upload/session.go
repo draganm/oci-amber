@@ -34,12 +34,19 @@ type Session struct {
 	path        string
 	maxInMemory int64
 
-	mu     sync.Mutex
-	buf    bytes.Buffer
-	file   *os.File
-	size   int64
-	hash   hash.Hash
-	closed bool
+	mu   sync.Mutex
+	buf  bytes.Buffer
+	file *os.File
+	size int64
+	hash hash.Hash
+
+	// closed makes Append and Spool return ErrUnknown; it is set on the
+	// first call to close, before the file is necessarily gone. removed
+	// is set only once the file has actually been unlinked (or there was
+	// none to unlink), which may take more than one call to close if an
+	// earlier attempt to remove the file failed. See close.
+	closed  bool
+	removed bool
 
 	// lastActive holds a UnixNano timestamp, updated by touch and read by
 	// active without taking mu. Append can hold mu for the whole duration
@@ -172,28 +179,42 @@ func (s *Session) active() time.Time {
 	return time.Unix(0, s.lastActive.Load())
 }
 
-// close releases the buffer, closes and deletes the file and marks the
-// session removed. It is idempotent. Unlinking the file here is safe even
-// while a Spool.Open reader for this session is still open elsewhere: on
-// Unix an open file descriptor keeps working after its directory entry is
-// removed (see Spool.Open).
+// removeFile is os.Remove, overridable in tests to simulate a filesystem
+// that transiently refuses to unlink a spooled session's file.
+var removeFile = os.Remove
+
+// close releases the buffer and marks the session unusable for Append and
+// Spool, which return ErrUnknown from their very next call onward. That
+// much happens on the first call and is final.
+//
+// Removing the file is a separate, retryable step: close does not consider
+// the file gone (and does not mark itself done) until removeFile actually
+// succeeds, or the path never existed. If removeFile fails, close returns
+// that error and a later call tries again from scratch — including
+// retrying the file descriptor close if that also failed — until the
+// unlink succeeds. Once it has, close is an idempotent no-op returning
+// nil. Unlinking the file is safe even while a Spool.Open reader for this
+// session is still open elsewhere: on Unix an open file descriptor keeps
+// working after its directory entry is removed (see Spool.Open).
 func (s *Session) close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.closed {
+	s.closed = true
+	if s.removed {
 		return nil
 	}
-	s.closed = true
 	s.buf = bytes.Buffer{}
-	var errs []error
+	var fdErr error
 	if s.file != nil {
 		if err := s.file.Close(); err != nil {
-			errs = append(errs, err)
+			fdErr = err
+		} else {
+			s.file = nil
 		}
-		s.file = nil
 	}
-	if err := os.Remove(s.path); err != nil && !errors.Is(err, os.ErrNotExist) {
-		errs = append(errs, err)
+	if err := removeFile(s.path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return errors.Join(fdErr, err)
 	}
-	return errors.Join(errs...)
+	s.removed = true
+	return fdErr
 }
