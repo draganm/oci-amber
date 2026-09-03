@@ -113,6 +113,8 @@ func (s *server) dispatch(w http.ResponseWriter, r *http.Request, rt route) {
 		s.handleBlob(w, r, rt)
 	case "uploads":
 		s.handleUpload(w, r, rt)
+	case "manifests":
+		s.handleManifests(w, r, rt)
 	default:
 		s.notFound(w)
 	}
