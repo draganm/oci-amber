@@ -1,0 +1,322 @@
+package store
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"io"
+	"iter"
+	"runtime"
+	"sync"
+
+	"github.com/jobs-build/amber-store-core/amberpack"
+	"github.com/jobs-build/amber-store-core/chunkers"
+	"github.com/jobs-build/amber-store-core/fstree"
+	"github.com/jobs-build/amber-store-core/key"
+	"github.com/jobs-build/amber-store-core/packstore"
+)
+
+// Stats is the accounting result of one Writer, as defined by the design
+// spec's "Accounting and logging / Per blob" section. Every byte count is
+// over the objects offered to the Writer, not over what the caller streamed
+// in: content chunks, file index nodes, directory leaves and nodes all
+// count.
+type Stats struct {
+	// LogicalBytes is the sum of the encoded size of every object offered,
+	// duplicates included.
+	LogicalBytes int64 `json:"logicalBytes"`
+	// NewLogicalBytes is the encoded size of the objects that were actually
+	// appended to the store (packstore.WriteStats.BytesStored).
+	NewLogicalBytes int64 `json:"newLogicalBytes"`
+	// DedupedBytes is LogicalBytes - NewLogicalBytes.
+	DedupedBytes int64 `json:"dedupedBytes"`
+	// DiskBytes is the number of bytes appended to pack segments: for every
+	// key that Has reported absent when it was first offered, the stored
+	// (compressed) payload size plus the record header.
+	DiskBytes int64 `json:"diskBytes"`
+	// ObjectsNew and ObjectsDeduped are packstore.WriteStats.Stored and
+	// Deduped.
+	ObjectsNew     int `json:"objectsNew"`
+	ObjectsDeduped int `json:"objectsDeduped"`
+}
+
+// Add returns the field-wise sum of a and b.
+func (a Stats) Add(b Stats) Stats {
+	return Stats{
+		LogicalBytes:    a.LogicalBytes + b.LogicalBytes,
+		NewLogicalBytes: a.NewLogicalBytes + b.NewLogicalBytes,
+		DedupedBytes:    a.DedupedBytes + b.DedupedBytes,
+		DiskBytes:       a.DiskBytes + b.DiskBytes,
+		ObjectsNew:      a.ObjectsNew + b.ObjectsNew,
+		ObjectsDeduped:  a.ObjectsDeduped + b.ObjectsDeduped,
+	}
+}
+
+var (
+	// errAborted is the cause a Writer's context is cancelled with by Abort;
+	// Close returns it (wrapped) after an Abort.
+	errAborted = errors.New("store: writer aborted")
+	// errWriterClosed is returned by Emit after Close or Abort.
+	errWriterClosed = errors.New("store: writer closed")
+)
+
+// emitBuffer bounds the objects queued between producers and the store
+// writers (each is at most one max-size chunk, so about 8 MiB in flight).
+const emitBuffer = 8
+
+// Writer streams CAS objects into the store through one
+// packstore.WriteParallel call and accounts for them. Objects are offered
+// with Emit (directly, or through PutStream, PutBytes and Dir) from any
+// number of goroutines; Close waits for every offered object to be durable
+// and returns the Stats. The Writer's context bounds its whole life: once
+// it is cancelled, Emit fails and Close returns the context's error.
+type Writer struct {
+	s      *Store
+	ctx    context.Context
+	cancel context.CancelCauseFunc
+	ic     chunkers.ItemChunker
+	ch     chan fstree.Object
+	done   chan struct{} // closed when WriteParallel has returned
+
+	mu     sync.RWMutex // held shared by Emit for the send; exclusively to close ch
+	closed bool
+
+	// Written only by the accounting iterator (the goroutine feeding
+	// WriteParallel) and by run; read after done is closed.
+	logical int64
+	seen    map[key.Key]bool // every key offered -> Has reported it absent
+	wstats  packstore.WriteStats
+	werr    error
+
+	once   sync.Once
+	result Stats
+	rerr   error
+}
+
+// NewWriter starts a Writer over s bound to ctx. It launches the store's
+// parallel writer immediately; the caller must end the Writer with Close
+// or Abort.
+func (s *Store) NewWriter(ctx context.Context) *Writer {
+	ctx, cancel := context.WithCancelCause(ctx)
+	w := &Writer{
+		s:      s,
+		ctx:    ctx,
+		cancel: cancel,
+		ic:     chunkers.NewItemChunker(ItemBits),
+		ch:     make(chan fstree.Object, emitBuffer),
+		done:   make(chan struct{}),
+		seen:   make(map[key.Key]bool),
+	}
+	go w.run()
+	return w
+}
+
+// writers is the WriteParallel worker count: GOMAXPROCS/2, at least 1.
+func writers() int {
+	return max(1, runtime.GOMAXPROCS(0)/2)
+}
+
+// run feeds WriteParallel from the accounting iterator and records its
+// result.
+func (w *Writer) run() {
+	defer close(w.done)
+	w.wstats, w.werr = w.s.Objects.WriteParallel(w.objects(), packstore.WriteOpts{
+		Writers: writers(),
+		Verify:  true,
+	})
+}
+
+// objects is the accounting iterator: it forwards every object received on
+// ch to WriteParallel, summing encoded sizes and remembering which keys the
+// store did not have when they were first offered. A cancelled context
+// stops the stream with the cancellation cause.
+func (w *Writer) objects() iter.Seq2[packstore.Object, error] {
+	return func(yield func(packstore.Object, error) bool) {
+		for {
+			select {
+			case <-w.ctx.Done():
+				yield(packstore.Object{}, context.Cause(w.ctx))
+				return
+			case o, ok := <-w.ch:
+				if !ok {
+					if err := context.Cause(w.ctx); err != nil {
+						yield(packstore.Object{}, err)
+					}
+					return
+				}
+				if err := w.account(o); err != nil {
+					yield(packstore.Object{}, err)
+					return
+				}
+				if !yield(packstore.Object{Key: o.Key, Data: o.Bytes}, nil) {
+					return
+				}
+			}
+		}
+	}
+}
+
+// account records one offered object. It runs on the iterator goroutine
+// only, so it needs no lock.
+func (w *Writer) account(o fstree.Object) error {
+	w.logical += int64(len(o.Bytes))
+	if _, seen := w.seen[o.Key]; seen {
+		return nil
+	}
+	has, err := w.s.Objects.Has(o.Key)
+	if err != nil {
+		return err
+	}
+	w.seen[o.Key] = !has
+	return nil
+}
+
+// Emit offers one built object to the store. It is safe for concurrent use
+// and blocks only while the pipeline is full. It fails once the Writer is
+// closed or aborted, its context is cancelled, or the store writer has
+// stopped with an error.
+func (w *Writer) Emit(o fstree.Object) error {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	if w.closed {
+		return w.stoppedErr()
+	}
+	if err := context.Cause(w.ctx); err != nil {
+		return err
+	}
+	select {
+	case w.ch <- o:
+		return nil
+	case <-w.ctx.Done():
+		return context.Cause(w.ctx)
+	case <-w.done:
+		if w.werr != nil {
+			return w.werr
+		}
+		return w.stoppedErr()
+	}
+}
+
+// stoppedErr is the error Emit reports once the Writer no longer accepts
+// objects: the cancellation cause (errAborted after Abort, the parent's
+// error after a context cancellation, errWriterClosed after Close), or
+// errWriterClosed while a Close is still in progress.
+func (w *Writer) stoppedErr() error {
+	if err := context.Cause(w.ctx); err != nil {
+		return err
+	}
+	return errWriterClosed
+}
+
+// byteOpts returns the store's content-defined chunking parameters. A fresh
+// value is returned per call because the chunker keeps the pointer.
+func (s *Store) byteOpts() *chunkers.ByteOpts {
+	return s.Config().Chunking.ByteOpts()
+}
+
+// PutStream chunks r with the store's content-defined chunker, emits one
+// Blob per chunk, builds the FileNode index above them and returns the
+// file's root key: a Blob for content that fits in one chunk (an empty
+// reader yields the empty Blob), a FileNode otherwise. The root's Length is
+// the byte length of the content. Safe for concurrent use.
+func (w *Writer) PutStream(r io.Reader) (key.Key, error) {
+	ib := fstree.NewFileIndexBuilder(w.ic)
+	saw := false
+	err := chunkers.SplitBytes(r, w.s.byteOpts(), func(chunk []byte) error {
+		saw = true
+		return w.addChunk(ib, chunk)
+	})
+	if err != nil {
+		return key.Key{}, err
+	}
+	if !saw {
+		if err := w.addChunk(ib, []byte{}); err != nil {
+			return key.Key{}, err
+		}
+	}
+	return ib.Finish(w.Emit)
+}
+
+// addChunk emits one content chunk and adds it to the file index.
+func (w *Writer) addChunk(ib *fstree.IndexBuilder, chunk []byte) error {
+	obj, err := fstree.EncodeBlob(chunk)
+	if err != nil {
+		return err
+	}
+	if err := w.Emit(obj); err != nil {
+		return err
+	}
+	return ib.AddChild(w.Emit, obj.Key, nil)
+}
+
+// PutBytes is PutStream over an in-memory buffer.
+func (w *Writer) PutBytes(b []byte) (key.Key, error) {
+	return w.PutStream(bytes.NewReader(b))
+}
+
+// Close ends the object stream, waits for WriteParallel to make everything
+// durable and returns the accounting. It is idempotent: later calls return
+// the same result. It returns the Writer's context error when the context
+// was cancelled, errAborted after Abort, and the store's error when a write
+// failed; in those cases the objects appended so far are left for GC.
+func (w *Writer) Close() (Stats, error) {
+	w.closeStream()
+	<-w.done
+	w.once.Do(func() {
+		w.result, w.rerr = w.finish()
+		w.cancel(errWriterClosed)
+	})
+	return w.result, w.rerr
+}
+
+// closeStream marks the Writer closed and closes the object channel once.
+func (w *Writer) closeStream() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.closed {
+		return
+	}
+	w.closed = true
+	close(w.ch)
+}
+
+// finish computes the Stats after WriteParallel has returned.
+func (w *Writer) finish() (Stats, error) {
+	err := w.werr
+	if err == nil {
+		err = context.Cause(w.ctx)
+	}
+	if err != nil {
+		return Stats{}, err
+	}
+	st := Stats{
+		LogicalBytes:    w.logical,
+		NewLogicalBytes: w.wstats.BytesStored,
+		DedupedBytes:    w.logical - w.wstats.BytesStored,
+		ObjectsNew:      w.wstats.Stored,
+		ObjectsDeduped:  w.wstats.Deduped,
+	}
+	for k, absent := range w.seen {
+		if !absent {
+			continue
+		}
+		size, found, err := w.s.Objects.StoredSize(k)
+		if err != nil {
+			return Stats{}, err
+		}
+		if found {
+			st.DiskBytes += int64(size) + amberpack.RecHeaderSize
+		}
+	}
+	return st, nil
+}
+
+// Abort stops the Writer: in-flight and later Emit calls fail, WriteParallel
+// is stopped, and Close reports errAborted. Objects already appended stay
+// in the store as unreachable garbage. Safe to call more than once and
+// after Close.
+func (w *Writer) Abort() {
+	w.cancel(errAborted)
+	w.closeStream()
+	<-w.done
+}
