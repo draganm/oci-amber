@@ -4,7 +4,10 @@ go 1.26.6
 
 require (
 	github.com/draganm/comp-prysm v0.1.0
+	github.com/draganm/tar-prism v0.1.2-0.20260903193749-d658ce95e35f
 	github.com/jobs-build/amber-store-core v0.0.3-0.20260827084116-2d22eef35a31
+	github.com/klauspost/compress v1.20.0
+	lukechampine.com/blake3 v1.4.1
 )
 
 require (
@@ -23,7 +26,6 @@ require (
 	github.com/cockroachdb/swiss v0.0.0-20251224182025-b0f6560f979b // indirect
 	github.com/cockroachdb/tokenbucket v0.0.0-20230807174530-cc333fc44b06 // indirect
 	github.com/cpuguy83/go-md2man/v2 v2.0.7 // indirect
-	github.com/draganm/tar-prism v0.1.2-0.20260903193749-d658ce95e35f // indirect
 	github.com/fxamacker/cbor/v2 v2.9.2 // indirect
 	github.com/getsentry/sentry-go v0.27.0 // indirect
 	github.com/go-git/gcfg v1.5.1-0.20230307220236-3a3c6141e376 // indirect
@@ -33,7 +35,6 @@ require (
 	github.com/golang/protobuf v1.5.4 // indirect
 	github.com/golang/snappy v0.0.5-0.20231225225746-43d5d4cd4e0e // indirect
 	github.com/jbenet/go-context v0.0.0-20150711004518-d14ea06fba99 // indirect
-	github.com/klauspost/compress v1.20.0 // indirect
 	github.com/klauspost/cpuid/v2 v2.0.12 // indirect
 	github.com/kr/pretty v0.3.1 // indirect
 	github.com/kr/text v0.2.0 // indirect
@@ -57,5 +58,4 @@ require (
 	golang.org/x/text v0.38.0 // indirect
 	google.golang.org/protobuf v1.33.0 // indirect
 	gopkg.in/warnings.v0 v0.1.2 // indirect
-	lukechampine.com/blake3 v1.4.1 // indirect
 )
