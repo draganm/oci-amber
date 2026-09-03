@@ -1,6 +1,7 @@
 package blob
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/draganm/oci-amber/oci"
 	"github.com/draganm/oci-amber/store"
+	"github.com/draganm/oci-amber/upload"
 )
 
 var (
@@ -280,4 +282,157 @@ func (k *keyedMutex) lock(d oci.Digest) func() {
 		}
 		k.mu.Unlock()
 	}
+}
+
+// Put finalizes an upload (spec "Blob finalization" steps 2-9 for raw
+// blobs): whole-blob dedup, finalize slot, analyze and classify, raw ingest
+// through the accounting writer, blob root, oci/blob/<digest> ref,
+// recent-uploads entry, log line, spool removal. A prism candidate is
+// rejected with errPrismUnavailable until Task 8 wires pass two in. On any
+// error nothing is published and the spool is left in place so the caller
+// can keep the session for a retry; on success the spool's backing file is
+// removed.
+func (b *Store) Put(ctx context.Context, sp *upload.Spool) (*Meta, error) {
+	if sp == nil {
+		return nil, errors.New("blob: nil spool")
+	}
+	d := sp.Digest()
+	size := sp.Size()
+	start := time.Now()
+
+	unlock := b.digests.lock(d)
+	defer unlock()
+
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	existing, err := b.Open(d)
+	switch {
+	case err == nil:
+		// Step 2: whole-blob dedup.
+		stats := store.Stats{LogicalBytes: size, DedupedBytes: size}
+		b.recordRecent(d, stats)
+		if err := sp.Remove(); err != nil {
+			b.log.Warn("removing spool", "digest", d, "error", err)
+		}
+		meta := existing.Meta
+		meta.Stats = stats
+		b.log.Info("blob already present", "digest", d, "size", size)
+		return &meta, nil
+	case !errors.Is(err, ErrNotFound):
+		return nil, err
+	}
+
+	// Step 3: finalize slot.
+	select {
+	case b.finalize <- struct{}{}:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	defer func() { <-b.finalize }()
+
+	// Steps 4 and 5: analyze and classify.
+	dec, err := b.analyze(ctx, sp)
+	if err != nil {
+		return nil, err
+	}
+	meta := Meta{
+		Version:    MetaVersion,
+		Digest:     d,
+		Size:       size,
+		Format:     dec.format,
+		UploadedAt: time.Now().UTC(),
+	}
+	var root key.Key
+	switch dec.kind {
+	case KindRaw:
+		// Step 7: raw path.
+		root, meta, err = b.finalizeRaw(ctx, sp, meta, dec.reason)
+	case KindPrism:
+		// Task 8: ingestPrism, second-pass verification, the round-trip
+		// check, and the decompose-failed / roundtrip-failed downgrades.
+		err = errPrismUnavailable
+	default:
+		err = fmt.Errorf("blob: unknown kind %q", dec.kind)
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	// Step 9: publish, record, log, discard the spool.
+	if err := b.st.Publish(RefName(d), root); err != nil {
+		return nil, fmt.Errorf("blob: publishing %s: %w", d, err)
+	}
+	b.recordRecent(d, meta.Stats)
+	b.logStored(meta, time.Since(start))
+	if err := sp.Remove(); err != nil {
+		b.log.Warn("removing spool", "digest", d, "error", err)
+	}
+	return &meta, nil
+}
+
+// finalizeRaw stores the verbatim spool bytes under the given reason and
+// builds the blob root. The ingest runs through its own accounting writer,
+// whose Stats become meta.Stats.
+func (b *Store) finalizeRaw(ctx context.Context, sp *upload.Spool, meta Meta, reason RawReason) (key.Key, Meta, error) {
+	w := b.st.NewWriter(ctx)
+	rawKey, err := b.ingestRaw(ctx, w, sp)
+	if err != nil {
+		w.Abort()
+		return key.Key{}, meta, err
+	}
+	stats, err := w.Close()
+	if err != nil {
+		return key.Key{}, meta, err
+	}
+	meta.Kind = KindRaw
+	meta.RawReason = reason
+	meta.DiffID = ""
+	meta.UncompressedSize = 0
+	meta.Entries = 0
+	meta.Engine = ""
+	meta.EngineVersion = ""
+	meta.Stats = stats
+	root, err := b.writeRoot(ctx, meta, map[string]key.Key{RawFile: rawKey}, key.Key{})
+	if err != nil {
+		return key.Key{}, meta, err
+	}
+	return root, meta, nil
+}
+
+// writeRoot builds the blob root through its own writer, so that the stats
+// recorded in meta.json are the ingest's and exclude the root itself.
+func (b *Store) writeRoot(ctx context.Context, meta Meta, files map[string]key.Key, blobsDir key.Key) (key.Key, error) {
+	w := b.st.NewWriter(ctx)
+	root, err := b.buildRoot(w, meta, files, blobsDir)
+	if err != nil {
+		w.Abort()
+		return key.Key{}, err
+	}
+	if _, err := w.Close(); err != nil {
+		return key.Key{}, err
+	}
+	return root, nil
+}
+
+// logStored emits the per-blob log line.
+func (b *Store) logStored(meta Meta, took time.Duration) {
+	attrs := []any{
+		"digest", meta.Digest,
+		"size", meta.Size,
+		"kind", meta.Kind,
+		"format", meta.Format,
+	}
+	if meta.Kind == KindPrism {
+		attrs = append(attrs, "engine", meta.Engine, "entries", meta.Entries)
+	} else {
+		attrs = append(attrs, "raw_reason", meta.RawReason)
+	}
+	attrs = append(attrs,
+		"logical_bytes", meta.Stats.LogicalBytes,
+		"deduped_bytes", meta.Stats.DedupedBytes,
+		"disk_bytes", meta.Stats.DiskBytes,
+		"duration", took,
+	)
+	b.log.Info("blob stored", attrs...)
 }
