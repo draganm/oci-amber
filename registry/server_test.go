@@ -1,0 +1,314 @@
+package registry
+
+import (
+	"bytes"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/draganm/oci-amber/blob"
+	"github.com/draganm/oci-amber/image"
+	"github.com/draganm/oci-amber/oci"
+	"github.com/draganm/oci-amber/store"
+	"github.com/draganm/oci-amber/upload"
+)
+
+// testEnv is a registry handler served by httptest over a real store on a
+// temporary directory.
+type testEnv struct {
+	srv       *httptest.Server
+	blobs     *blob.Store
+	uploads   *upload.Manager
+	uploadDir string
+	client    *http.Client
+}
+
+func newTestEnv(t *testing.T) *testEnv {
+	t.Helper()
+	dir := t.TempDir()
+	log := slog.New(slog.NewTextHandler(t.Output(), &slog.HandlerOptions{Level: slog.LevelDebug}))
+	st, err := store.Open(filepath.Join(dir, "store"), store.Options{Logger: log})
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	t.Cleanup(func() { st.Close() })
+	work := filepath.Join(dir, "work")
+	blobs, err := blob.New(st, blob.Options{
+		WorkDir:               work,
+		MaxInMemory:           1 << 20,
+		AnalyzeParallelism:    1,
+		AnalyzeTimeout:        time.Minute,
+		MaxConcurrentFinalize: 1,
+		VerifyRoundTrip:       true,
+		RecentTTL:             time.Hour,
+	}, log)
+	if err != nil {
+		t.Fatalf("blob.New: %v", err)
+	}
+	uploadDir := filepath.Join(work, "uploads")
+	if err := os.MkdirAll(uploadDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	uploads, err := upload.NewManager(uploadDir, 1<<20, time.Hour, log)
+	if err != nil {
+		t.Fatalf("upload.NewManager: %v", err)
+	}
+	t.Cleanup(func() { uploads.Close() })
+	images := image.New(st, blobs, log)
+	srv := httptest.NewServer(New(blobs, images, uploads, log))
+	t.Cleanup(srv.Close)
+	return &testEnv{srv: srv, blobs: blobs, uploads: uploads, uploadDir: uploadDir, client: srv.Client()}
+}
+
+// response is an http.Response whose body has been read.
+type response struct {
+	*http.Response
+	body []byte
+}
+
+func (e *testEnv) do(t *testing.T, method, path string, body []byte, headers map[string]string) *response {
+	t.Helper()
+	var rd io.Reader
+	if body != nil {
+		rd = bytes.NewReader(body)
+	}
+	req, err := http.NewRequest(method, e.srv.URL+path, rd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
+	resp, err := e.client.Do(req)
+	if err != nil {
+		t.Fatalf("%s %s: %v", method, path, err)
+	}
+	defer resp.Body.Close()
+	b, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("%s %s: read body: %v", method, path, err)
+	}
+	return &response{Response: resp, body: b}
+}
+
+func assertStatus(t *testing.T, resp *response, want int) {
+	t.Helper()
+	if resp.StatusCode != want {
+		t.Fatalf("%s %s: status %d, want %d; body %q", resp.Request.Method, resp.Request.URL.Path, resp.StatusCode, want, resp.body)
+	}
+}
+
+func assertHeader(t *testing.T, resp *response, name, want string) {
+	t.Helper()
+	if got := resp.Header.Get(name); got != want {
+		t.Fatalf("%s %s: header %s = %q, want %q", resp.Request.Method, resp.Request.URL.Path, name, got, want)
+	}
+}
+
+func assertErrorCode(t *testing.T, resp *response, status int, code oci.ErrorCode) {
+	t.Helper()
+	assertStatus(t, resp, status)
+	if ct := resp.Header.Get("Content-Type"); ct != "application/json" {
+		t.Fatalf("error response Content-Type = %q, want application/json", ct)
+	}
+	var env oci.ErrorResponse
+	if err := json.Unmarshal(resp.body, &env); err != nil {
+		t.Fatalf("error body %q is not an error envelope: %v", resp.body, err)
+	}
+	if len(env.Errors) != 1 || env.Errors[0].Code != code {
+		t.Fatalf("errors = %+v, want exactly one error with code %s", env.Errors, code)
+	}
+}
+
+func assertEmptyErrors(t *testing.T, resp *response, status int) {
+	t.Helper()
+	assertStatus(t, resp, status)
+	if strings.TrimSpace(string(resp.body)) != `{"errors":[]}` {
+		t.Fatalf("body = %q, want {\"errors\":[]}", resp.body)
+	}
+}
+
+const fakeHex = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+func TestBaseEndpoint(t *testing.T) {
+	e := newTestEnv(t)
+
+	resp := e.do(t, http.MethodGet, "/v2/", nil, nil)
+	assertStatus(t, resp, http.StatusOK)
+	assertHeader(t, resp, "Docker-Distribution-API-Version", "registry/2.0")
+	assertHeader(t, resp, "Content-Type", "application/json")
+	if string(resp.body) != "{}" {
+		t.Fatalf("body = %q, want {}", resp.body)
+	}
+
+	resp = e.do(t, http.MethodHead, "/v2/", nil, nil)
+	assertStatus(t, resp, http.StatusOK)
+	assertHeader(t, resp, "Docker-Distribution-API-Version", "registry/2.0")
+
+	resp = e.do(t, http.MethodPost, "/v2/", nil, nil)
+	assertErrorCode(t, resp, http.StatusMethodNotAllowed, oci.CodeUnsupported)
+	if allow := resp.Header.Get("Allow"); !strings.Contains(allow, "GET") {
+		t.Fatalf("Allow = %q, want it to list GET", allow)
+	}
+}
+
+func TestParsePath(t *testing.T) {
+	cases := []struct {
+		path string
+		ok   bool
+		want route
+	}{
+		{"/v2/foo/blobs/sha256:" + fakeHex, true, route{"foo", "blobs", "sha256:" + fakeHex}},
+		{"/v2/library/app/manifests/latest", true, route{"library/app", "manifests", "latest"}},
+		{"/v2/a/b/c/d/manifests/sha256:" + fakeHex, true, route{"a/b/c/d", "manifests", "sha256:" + fakeHex}},
+		{"/v2/foo/blobs/bar/blobs/sha256:" + fakeHex, true, route{"foo/blobs/bar", "blobs", "sha256:" + fakeHex}},
+		{"/v2/foo/manifests/blobs/sha256:" + fakeHex, true, route{"foo/manifests", "blobs", "sha256:" + fakeHex}},
+		{"/v2/foo/tags/tags/list", true, route{"foo/tags", "tags", "list"}},
+		{"/v2/foo/blobs/uploads/", true, route{"foo", "uploads", ""}},
+		{"/v2/a/b/blobs/uploads/0123abcd", true, route{"a/b", "uploads", "0123abcd"}},
+		{"/v2/foo/blobs/uploads/a/b", true, route{"foo", "uploads", "a/b"}},
+		{"/v2/foo/tags/list", true, route{"foo", "tags", "list"}},
+		{"/v2/foo/referrers/sha256:" + fakeHex, true, route{"foo", "referrers", "sha256:" + fakeHex}},
+		{"/v2/foo/blobs/", true, route{"foo", "blobs", ""}},
+		{"/v2/", false, route{}},
+		{"/v2/_catalog", false, route{}},
+		{"/v2/foo", false, route{}},
+		{"/v2/blobs/sha256:" + fakeHex, false, route{}},
+		{"/v1/foo/blobs/sha256:" + fakeHex, false, route{}},
+		{"/v2/foo/blobs", false, route{}},
+	}
+	for _, c := range cases {
+		got, ok := parsePath(c.path)
+		if ok != c.ok || got != c.want {
+			t.Errorf("parsePath(%q) = %+v, %v; want %+v, %v", c.path, got, ok, c.want, c.ok)
+		}
+	}
+}
+
+func TestInvalidNameRejected(t *testing.T) {
+	e := newTestEnv(t)
+	for _, path := range []string{
+		"/v2/Foo/blobs/sha256:" + fakeHex,
+		"/v2/foo_/blobs/uploads/",
+		"/v2/foo//bar/manifests/latest",
+		"/v2/" + strings.Repeat("a", 256) + "/tags/list",
+	} {
+		resp := e.do(t, http.MethodGet, path, nil, nil)
+		assertErrorCode(t, resp, http.StatusBadRequest, oci.CodeNameInvalid)
+		assertHeader(t, resp, "Docker-Distribution-API-Version", "registry/2.0")
+	}
+}
+
+func TestUnknownPathsAreEmpty404(t *testing.T) {
+	e := newTestEnv(t)
+	for _, path := range []string{"/v2/foo/bar", "/v2/foo", "/v2/foo/blobs", "/v2/foo/blobs/uploads/a/b", "/nope", "/"} {
+		resp := e.do(t, http.MethodGet, path, nil, nil)
+		assertEmptyErrors(t, resp, http.StatusNotFound)
+		assertHeader(t, resp, "Docker-Distribution-API-Version", "registry/2.0")
+	}
+}
+
+func TestHandleErrorMapping(t *testing.T) {
+	s := &server{log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	cases := []struct {
+		err    error
+		status int
+		code   oci.ErrorCode
+	}{
+		{blob.ErrNotFound, http.StatusNotFound, oci.CodeBlobUnknown},
+		{fmt.Errorf("open: %w", blob.ErrNotFound), http.StatusNotFound, oci.CodeBlobUnknown},
+		{image.ErrNotFound, http.StatusNotFound, oci.CodeManifestUnknown},
+		{upload.ErrUnknown, http.StatusNotFound, oci.CodeBlobUploadUnknown},
+		{oci.NewError(oci.CodeDigestInvalid, "bad"), http.StatusBadRequest, oci.CodeDigestInvalid},
+		{fmt.Errorf("wrapped: %w", oci.NewError(oci.CodeNameUnknown, "nope")), http.StatusNotFound, oci.CodeNameUnknown},
+	}
+	for _, c := range cases {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/v2/x/blobs/sha256:"+fakeHex, nil)
+		s.handleError(rec, req, c.err)
+		resp := &response{Response: rec.Result(), body: rec.Body.Bytes()}
+		resp.Request = req
+		assertErrorCode(t, resp, c.status, c.code)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v2/x/blobs/sha256:"+fakeHex, nil)
+	s.handleError(rec, req, errors.New("disk on fire"))
+	resp := &response{Response: rec.Result(), body: rec.Body.Bytes()}
+	resp.Request = req
+	assertEmptyErrors(t, resp, http.StatusInternalServerError)
+}
+
+func TestWithRecovery(t *testing.T) {
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	h := withRecovery(log, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		panic("boom")
+	}))
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v2/", nil)
+	h.ServeHTTP(rec, req)
+	resp := &response{Response: rec.Result(), body: rec.Body.Bytes()}
+	resp.Request = req
+	assertEmptyErrors(t, resp, http.StatusInternalServerError)
+	assertHeader(t, resp, "Content-Type", "application/json")
+
+	// A panic after the response started cannot be turned into an envelope:
+	// the connection is aborted instead.
+	h = withRecovery(log, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		io.WriteString(w, "partial")
+		panic("boom")
+	}))
+	func() {
+		defer func() {
+			rec := recover()
+			if err, ok := rec.(error); !ok || !errors.Is(err, http.ErrAbortHandler) {
+				t.Fatalf("recovered %v, want http.ErrAbortHandler", rec)
+			}
+		}()
+		h.ServeHTTP(httptest.NewRecorder(), req)
+	}()
+
+	// http.ErrAbortHandler itself passes through untouched.
+	h = withRecovery(log, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		panic(http.ErrAbortHandler)
+	}))
+	func() {
+		defer func() {
+			rec := recover()
+			if err, ok := rec.(error); !ok || !errors.Is(err, http.ErrAbortHandler) {
+				t.Fatalf("recovered %v, want http.ErrAbortHandler", rec)
+			}
+		}()
+		h.ServeHTTP(httptest.NewRecorder(), req)
+	}()
+}
+
+func TestPanicInHandlerThroughServer(t *testing.T) {
+	// End to end: a panicking handler behind New's wrapper answers 500 with
+	// an empty errors list and the connection stays usable.
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	srv := httptest.NewServer(withRecovery(log, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		panic("boom")
+	})))
+	defer srv.Close()
+	resp, err := srv.Client().Get(srv.URL + "/v2/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusInternalServerError || strings.TrimSpace(string(body)) != `{"errors":[]}` {
+		t.Fatalf("status %d body %q", resp.StatusCode, body)
+	}
+}
