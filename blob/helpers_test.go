@@ -61,10 +61,10 @@ func newTestStore(t *testing.T, opts Options) (*Store, *store.Store, *logBuffer)
 
 func spoolOf(data []byte) *upload.Spool { return upload.NewMemorySpool(data) }
 
-// spoolDirOf is the comp-prysm temp directory of b.
+// spoolDirOf is the zrecipe temp directory of b.
 func spoolDirOf(b *Store) string { return filepath.Join(b.opts.WorkDir, spoolDirName) }
 
-// assertSpoolDirEmpty fails when comp-prysm left a file under the work dir.
+// assertSpoolDirEmpty fails when zrecipe left a file under the work dir.
 func assertSpoolDirEmpty(t *testing.T, b *Store) {
 	t.Helper()
 	entries, err := os.ReadDir(spoolDirOf(b))
@@ -139,7 +139,7 @@ func gzipBytes(t *testing.T, data []byte, level int) []byte {
 // compress/flate writers at different levels joined at a sync-flush
 // boundary. It inflates fine, but no single-pass encoder emits an empty
 // stored block followed by a restarted compressor at another level, so
-// comp-prysm cannot reproduce it.
+// zrecipe cannot reproduce it.
 func twoLevelGzip(t *testing.T, part1, part2 []byte) []byte {
 	t.Helper()
 	var payload bytes.Buffer

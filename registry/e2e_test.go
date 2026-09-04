@@ -46,7 +46,7 @@ const (
 	e2eBase = "tools/base"
 )
 
-// e2eMaxInMemory is the upload-session and comp-prysm spool threshold. Layers
+// e2eMaxInMemory is the upload-session and zrecipe spool threshold. Layers
 // A and C are larger, so both spill paths run and their sessions are backed
 // by a file under <work>/oci-amber/uploads/<id>.
 const e2eMaxInMemory = 1 << 20
@@ -1182,7 +1182,7 @@ func (e *e2eEnv) checkLogs() {
 			continue
 		}
 		e2eAbsent(t, rec, "raw_reason")
-		// comp-prysm reports no engine for an uncompressed input (Format
+		// zrecipe reports no engine for an uncompressed input (Format
 		// none): there is no compressor whose output has to be reproduced.
 		// Every compressed prism names the engine that reproduces it.
 		engine := e2eStr(t, rec, "engine")

@@ -3,8 +3,8 @@ module github.com/draganm/oci-amber
 go 1.26.6
 
 require (
-	github.com/draganm/comp-prysm v0.1.0
 	github.com/draganm/tar-prism v0.1.2-0.20260903193749-d658ce95e35f
+	github.com/draganm/zrecipe v0.2.0
 	github.com/jobs-build/amber-store-core v0.0.3-0.20260827084116-2d22eef35a31
 	github.com/klauspost/compress v1.20.0
 	github.com/urfave/cli/v2 v2.27.7

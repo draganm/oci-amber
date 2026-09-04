@@ -4,12 +4,12 @@ oci-amber is an OCI distribution registry whose storage is an embedded
 [amber-store-core](https://github.com/jobs-build/amber-store-core) store. It
 accepts image pushes over HTTP like any registry, but instead of keeping each
 layer as an opaque compressed blob it takes the layer apart with
-[comp-prysm](https://github.com/draganm/comp-prysm) (compressed stream ->
+[zrecipe](https://github.com/draganm/zrecipe) (compressed stream ->
 uncompressed tar + compression recipe) and
 [tar-prism](https://github.com/draganm/tar-prism) (tar -> per-file contents +
 tar recipe), so that file contents deduplicate across layers and images in
 amber's content-defined-chunked store. Pulls rebuild the original bytes on the
-fly by streaming the pieces back through tar-prism and comp-prysm, and every
+fly by streaming the pieces back through tar-prism and zrecipe, and every
 served blob is byte-identical to what was pushed.
 
 ## Goals
@@ -37,7 +37,7 @@ served blob is byte-identical to what was pushed.
   restart; clients handle `BLOB_UPLOAD_UNKNOWN` by restarting the blob.
 - Range requests on layers stored as prisms. They are answered with the full
   body (spec-legal).
-- Storing layers that comp-prysm cannot reproduce as anything other than the
+- Storing layers that zrecipe cannot reproduce as anything other than the
   verbatim bytes (no tar-level dedup for them).
 
 ## Dependencies
@@ -45,10 +45,10 @@ served blob is byte-identical to what was pushed.
 | Module | Used for |
 |---|---|
 | `github.com/jobs-build/amber-store-core` | packstore, refstore, fstree builders/readers, chunkers, gc |
-| `github.com/draganm/comp-prysm` | `Analyze`, `Recompress`, `Params` |
+| `github.com/draganm/zrecipe` | `Analyze`, `Recompress`, `Params` |
 | `github.com/draganm/tar-prism` | `DecomposeTo`, `ComposeFrom`, `Index`, `Entry` (new sink/source API, see below) |
 | `github.com/klauspost/compress` | second-pass gzip and zstd decompression |
-| `lukechampine.com/blake3` | verifying the second pass against comp-prysm's recorded digest |
+| `lukechampine.com/blake3` | verifying the second pass against zrecipe's recorded digest |
 | `github.com/urfave/cli/v2` | the `oci-amber` command line |
 | `log/slog` | logging |
 
@@ -56,7 +56,7 @@ All three owner libraries are AGPL-3.0-or-later; oci-amber uses the same
 license.
 
 The Nix dev shell provides Go, `pkg-config`, `zlib`, `zstd` (headers and
-libraries, for comp-prysm's cgo engines), `gzip`, `pigz` (fixtures) and
+libraries, for zrecipe's cgo engines), `gzip`, `pigz` (fixtures) and
 `crane` (client smoke test).
 
 ## Package layout
@@ -98,7 +98,7 @@ The store directory layout is `<store>/packstore`, `<store>/refs`,
 `<store>/gc` and `<store>/oci-amber.json`. In-flight state lives under
 `<work-dir>/oci-amber/` (default work directory `<store>/work`), a
 subdirectory the registry owns: `uploads/` (spilled upload sessions) and
-`spool/` (comp-prysm's temp dir). The contents of those two are removed at
+`spool/` (zrecipe's temp dir). The contents of those two are removed at
 startup; neither they nor anything else under the operator-supplied
 `--work-dir` is ever deleted.
 
@@ -113,12 +113,12 @@ content always yields identical keys.
 ### Blob root
 
 One per OCI blob digest. It is literally a tar-prism prism directory with two
-extra files, so `amber-store restore` + `tar-prism compose` + `comp-prysm
+extra files, so `amber-store restore` + `tar-prism compose` + `zrecipe
 recompress` reproduce the blob with the existing CLIs.
 
 ```
 meta.json     oci-amber metadata (below)
-comp.json     comp-prysm Params (Params.Write output)          prism only
+comp.json     zrecipe Params (Params.Write output)          prism only
 recipe.bin    tar-prism recipe                                  prism only
 recipe.json   tar-prism Index                                   prism only
 blobs/        00000001, 00000002, ... regular-file contents     prism only
@@ -153,7 +153,7 @@ raw           the verbatim uploaded bytes                       raw only
 
 - `size` is the OCI blob size (compressed bytes as received).
 - `kind` is `prism` or `raw`.
-- `format` is comp-prysm's detected format: `gzip`, `zstd` or `none`.
+- `format` is zrecipe's detected format: `gzip`, `zstd` or `none`.
 - `rawReason` is omitted for prisms; for raw blobs one of `not-reproducible`,
   `unsupported`, `corrupt`, `not-tar`, `analyze-timeout`, `roundtrip-failed`,
   `decompose-failed`.
@@ -245,7 +245,7 @@ Sessions live in a mutex-protected map. A sweeper removes sessions idle for
 longer than `--upload-timeout` (default 1 h) together with their files.
 Finalization takes a snapshot of the session's data as an `io.ReadSeeker`
 that also implements `io.ReaderAt` (`*bytes.Reader`, or a section reader over
-the spilled file), so comp-prysm can search candidates in parallel. The
+the spilled file), so zrecipe can search candidates in parallel. The
 session stays registered until the blob is published, so a `500` during
 finalization leaves it in place for the client to retry the `PUT`; success
 removes the session and its file.
@@ -263,7 +263,7 @@ body has been appended, and on a monolithic `POST ?digest=`.
 3. **Finalize slot.** Acquire one of `--max-concurrent-finalize` slots
    (default `max(1, NumCPU/2)`). This bounds engine-search CPU and spool
    memory.
-4. **Pass one: analyze.** `compprysm.Analyze(ctx, spool, &Options{TempDir:
+4. **Pass one: analyze.** `zrecipe.Analyze(ctx, spool, &Options{TempDir:
    <work-dir>/oci-amber/spool, MaxInMemory: --max-in-memory, Parallelism:
    --analyze-parallelism (default 2)})` under a child context with
    `--analyze-timeout` (default 15 min). No `Uncompressed` sink is attached.
@@ -369,7 +369,7 @@ the second one hits the whole-blob dedup check.
 4. Prism: read `comp.json` into `Params`. A goroutine runs
    `tarprism.ComposeFrom(source, pipeWriter)` where `source` serves
    `recipe.bin`, `recipe.json` and `blobs/%08d` as amber streaming readers.
-   The handler runs `compprysm.Recompress(ctx, params, pipeReader,
+   The handler runs `zrecipe.Recompress(ctx, params, pipeReader,
    io.MultiWriter(w, sha256), &RecompressOptions{AllowVersionMismatch:
    true})`. Range requests are answered with the full body.
 5. After the body: if `Recompress` or `ComposeFrom` returned an error, or the
@@ -510,12 +510,12 @@ may see a key as absent); the stored bytes are correct because
 - Finalization: semaphore of `--max-concurrent-finalize`. Per-digest mutex so
   two uploads of the same blob do not both ingest it.
 - Ref publication: per-name mutex around PrepareRef/Put/commit.
-- comp-prysm `Parallelism` is `--analyze-parallelism`, default 2; each worker
+- zrecipe `Parallelism` is `--analyze-parallelism`, default 2; each worker
   holds one engine working set (libzstd at high levels uses hundreds of MB).
 - `WriteParallel` writers: `GOMAXPROCS/2`, minimum 1, with `Verify: true`
   (recompute the key before appending; cheap insurance).
 - Memory per finalize: the compressed spool (up to `--max-in-memory`),
-  comp-prysm's decompressed spool (up to `--max-in-memory`, then an unlinked
+  zrecipe's decompressed spool (up to `--max-in-memory`, then an unlinked
   temp file), engine working sets, and about 8 MiB of pipeline buffers.
   Everything else streams.
 
@@ -541,8 +541,8 @@ variables through urfave/cli):
 | `--store` | required | store directory |
 | `--work-dir` | `<store>/work` | registry state lives under `<work-dir>/oci-amber/{uploads,spool}`; only those two directories are emptied at startup |
 | `--listen` | `:5000` | listen address |
-| `--max-in-memory` | `64MiB` | upload spool and comp-prysm spool threshold |
-| `--analyze-parallelism` | `2` | comp-prysm candidate workers per blob |
+| `--max-in-memory` | `64MiB` | upload spool and zrecipe spool threshold |
+| `--analyze-parallelism` | `2` | zrecipe candidate workers per blob |
 | `--analyze-timeout` | `15m` | per-blob analyze deadline before raw fallback |
 | `--max-concurrent-finalize` | `NumCPU/2` (min 1) | concurrent blob finalizations |
 | `--verify-roundtrip` | `true` | pull-pipeline check before publishing a prism |
@@ -602,7 +602,7 @@ and source; oci-amber then requires that version.
 
 | Situation | Outcome |
 |---|---|
-| comp-prysm `ErrNotReproducible`, `ErrUnsupported`, `ErrCorrupt`, non-tar `none` or compressed non-tar (first decompressed block), zstd frame window above 128 MiB (`unsupported`), analyze deadline | stored raw, reason recorded, `201` |
+| zrecipe `ErrNotReproducible`, `ErrUnsupported`, `ErrCorrupt`, non-tar `none` or compressed non-tar (first decompressed block), zstd frame window above 128 MiB (`unsupported`), analyze deadline | stored raw, reason recorded, `201` |
 | second-pass digest mismatch, tar-prism decompose error, round-trip failure | stored raw, reason recorded, error-level log for the last two, `201`. A compressed blob that is not a tar never reaches this row: step 5 classifies it `not-tar` before the engine search, so the error level is reserved for archives that really did look decomposable |
 | amber write error, I/O error on the spool, request context cancelled during finalize | `500`, session retained for retry, nothing published |
 | ref publish error | `500`, objects left for GC |

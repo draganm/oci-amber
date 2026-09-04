@@ -16,7 +16,7 @@ import (
 )
 
 // ReaderAtSeeker is the view of an upload that blob finalization consumes: a
-// seekable stream that can also be read at arbitrary offsets, so comp-prysm
+// seekable stream that can also be read at arbitrary offsets, so zrecipe
 // can evaluate candidate engines in parallel over one open spool.
 type ReaderAtSeeker interface {
 	io.ReadSeeker

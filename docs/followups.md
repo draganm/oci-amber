@@ -5,7 +5,7 @@ Collected from the per-task and whole-branch reviews of the initial implementati
 ## Upstream (outside this repository)
 
 - tar-prism: `sink-source-api` is pinned as a pseudo-version of an unmerged branch; merge and tag it, then re-pin. Minor notes from its review: `DecomposeTo` closes the recipe writer through explicit calls rather than a defer; a sink or source returning `(nil, nil)` panics instead of erroring; a final `(n>0, non-EOF err)` read is treated as an error even when all bytes were consumed; the compose loop's error label says "copying recipe" for writer failures.
-- comp-prysm: zlib engine at deflate level 0 emits stored blocks sized by the caller's writes, so `Analyze` accepts streams `Recompress` cannot rebuild (see `docs/comp-prysm-zlib-level0-roundtrip.md`). Also: no option to bound the pass-one zstd decoder window (oci-amber pre-checks the frame header instead).
+- zrecipe (formerly comp-prysm): the zlib level-0 feeding bug that made `Analyze` accept streams `Recompress` could not rebuild (`docs/zrecipe-zlib-level0-roundtrip.md`) is fixed in v0.2.0, which oci-amber now pins; the crane smoke test asserts the affected layer is a prism. Still open upstream: no option to bound the pass-one zstd decoder window (oci-amber pre-checks the frame header instead).
 
 ## By area
 

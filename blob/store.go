@@ -66,7 +66,7 @@ type recentEntry struct {
 }
 
 // New returns a Store over st. It creates <WorkDir>/spool, the directory
-// comp-prysm spills to, if it does not exist and removes what a previous
+// zrecipe spills to, if it does not exist and removes what a previous
 // process left in it. Only the contents of that one directory are deleted:
 // neither it nor WorkDir is ever removed, because WorkDir is derived from
 // an operator-supplied path (see cmd/oci-amber).

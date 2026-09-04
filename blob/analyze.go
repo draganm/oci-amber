@@ -10,8 +10,8 @@ import (
 	"strconv"
 	"strings"
 
-	compprysm "github.com/draganm/comp-prysm"
-	cpformat "github.com/draganm/comp-prysm/format"
+	zrecipe "github.com/draganm/zrecipe"
+	cpformat "github.com/draganm/zrecipe/format"
 
 	"github.com/draganm/oci-amber/upload"
 )
@@ -19,9 +19,9 @@ import (
 // decision is the outcome of pass one: how the blob will be stored.
 type decision struct {
 	kind   Kind
-	reason RawReason         // set for KindRaw
-	params *compprysm.Params // set for KindPrism
-	format string            // "gzip" | "zstd" | "none", always set
+	reason RawReason       // set for KindRaw
+	params *zrecipe.Params // set for KindPrism
+	format string          // "gzip" | "zstd" | "none", always set
 }
 
 // tarHeaderSize is one tar block; the first block of a tar is a header.
@@ -32,13 +32,13 @@ const tarHeaderSize = 512
 // a frame that declares a bigger window is never decompressed at all.
 const maxZstdWindow = 128 << 20
 
-// spoolDir is the directory comp-prysm spills its decompressed spool to.
+// spoolDir is the directory zrecipe spills its decompressed spool to.
 func (b *Store) spoolDir() string { return filepath.Join(b.opts.WorkDir, spoolDirName) }
 
-// analyze runs comp-prysm's first pass under the analyze deadline and
+// analyze runs zrecipe's first pass under the analyze deadline and
 // classifies the result (spec finalization steps 4 and 5). It returns an
 // error only for failures that must fail the upload: the request context
-// ended, an I/O error, an unexpected comp-prysm error. Every fallback case
+// ended, an I/O error, an unexpected zrecipe error. Every fallback case
 // is a raw decision carrying its reason.
 func (b *Store) analyze(ctx context.Context, sp *upload.Spool) (decision, error) {
 	if err := ctx.Err(); err != nil {
@@ -53,7 +53,7 @@ func (b *Store) analyze(ctx context.Context, sp *upload.Spool) (decision, error)
 	}
 
 	// Detect first so a raw fallback still records the container format.
-	f, err := compprysm.Detect(r)
+	f, err := zrecipe.Detect(r)
 	if err != nil {
 		return decision{}, fmt.Errorf("blob: detecting format: %w", err)
 	}
@@ -65,7 +65,7 @@ func (b *Store) analyze(ctx context.Context, sp *upload.Spool) (decision, error)
 	// newDecompressor's bounded decoder discover the same fact mid-probe or
 	// mid-Analyze would mean it already started reading compressed data
 	// under a window budget it cannot honor.
-	if f == compprysm.FormatZstd {
+	if f == zrecipe.FormatZstd {
 		windowSize, err := zstdWindowSize(r)
 		if err == nil && windowSize > maxZstdWindow {
 			b.log.Info("zstd window exceeds limit, storing raw",
@@ -81,7 +81,7 @@ func (b *Store) analyze(ctx context.Context, sp *upload.Spool) (decision, error)
 	// engine search and a pass two that tar-prism is bound to reject (spec
 	// "Blob finalization" step 5). The probe decompresses one 512-byte
 	// block through klauspost; nothing is spooled.
-	if f != compprysm.FormatNone {
+	if f != zrecipe.FormatNone {
 		ok, err := startsWithCompressedTarHeader(r, f)
 		if err == nil && !ok {
 			return decision{kind: KindRaw, reason: ReasonNotTar, format: format}, nil
@@ -93,7 +93,7 @@ func (b *Store) analyze(ctx context.Context, sp *upload.Spool) (decision, error)
 
 	actx, cancel := context.WithTimeout(ctx, b.opts.AnalyzeTimeout)
 	defer cancel()
-	params, err := compprysm.Analyze(actx, r, &compprysm.Options{
+	params, err := zrecipe.Analyze(actx, r, &zrecipe.Options{
 		TempDir:     b.spoolDir(),
 		MaxInMemory: b.opts.MaxInMemory,
 		Parallelism: b.opts.AnalyzeParallelism,
@@ -105,11 +105,11 @@ func (b *Store) analyze(ctx context.Context, sp *upload.Spool) (decision, error)
 		case errors.Is(err, context.DeadlineExceeded):
 			// Only the child deadline can have expired here.
 			return decision{kind: KindRaw, reason: ReasonAnalyzeTimeout, format: format}, nil
-		case errors.Is(err, compprysm.ErrNotReproducible):
+		case errors.Is(err, zrecipe.ErrNotReproducible):
 			return decision{kind: KindRaw, reason: ReasonNotReproducible, format: format}, nil
-		case errors.Is(err, compprysm.ErrUnsupported):
+		case errors.Is(err, zrecipe.ErrUnsupported):
 			return decision{kind: KindRaw, reason: ReasonUnsupported, format: format}, nil
-		case errors.Is(err, compprysm.ErrCorrupt):
+		case errors.Is(err, zrecipe.ErrCorrupt):
 			return decision{kind: KindRaw, reason: ReasonCorrupt, format: format}, nil
 		default:
 			return decision{}, fmt.Errorf("blob: analyze: %w", err)
@@ -120,7 +120,7 @@ func (b *Store) analyze(ctx context.Context, sp *upload.Spool) (decision, error)
 		return decision{}, fmt.Errorf("blob: analyze: %w", err)
 	}
 	format = string(params.Format)
-	if params.Format == compprysm.FormatNone {
+	if params.Format == zrecipe.FormatNone {
 		ok, err := startsWithTarHeader(r)
 		if err != nil {
 			return decision{}, fmt.Errorf("blob: reading tar header: %w", err)
@@ -139,7 +139,7 @@ func (b *Store) analyze(ctx context.Context, sp *upload.Spool) (decision, error)
 // rewinds r itself (its Detect does), so the position left behind does not
 // matter. A stream with fewer than 512 decompressed bytes is not a tar; any
 // other failure returns an error and decides nothing.
-func startsWithCompressedTarHeader(r io.ReadSeeker, f compprysm.Format) (bool, error) {
+func startsWithCompressedTarHeader(r io.ReadSeeker, f zrecipe.Format) (bool, error) {
 	if _, err := r.Seek(0, io.SeekStart); err != nil {
 		return false, err
 	}

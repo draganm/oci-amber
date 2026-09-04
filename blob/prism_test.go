@@ -14,8 +14,8 @@ import (
 	"testing"
 	"time"
 
-	compprysm "github.com/draganm/comp-prysm"
 	tarprism "github.com/draganm/tar-prism"
+	zrecipe "github.com/draganm/zrecipe"
 	"github.com/klauspost/compress/zstd"
 
 	"github.com/draganm/oci-amber/oci"
@@ -371,11 +371,11 @@ func TestPrismRootLayout(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	params, err := compprysm.ReadParams(bytes.NewReader(compData))
+	params, err := zrecipe.ReadParams(bytes.NewReader(compData))
 	if err != nil {
 		t.Fatalf("comp.json: %v", err)
 	}
-	if params.Format != compprysm.FormatGzip || params.Engine != meta.Engine || params.EngineVersion != meta.EngineVersion {
+	if params.Format != zrecipe.FormatGzip || params.Engine != meta.Engine || params.EngineVersion != meta.EngineVersion {
 		t.Errorf("comp.json = %s/%s/%s, meta = gzip/%s/%s", params.Format, params.Engine, params.EngineVersion, meta.Engine, meta.EngineVersion)
 	}
 	if params.Uncompressed.Size != int64(len(tarData)) || params.Compressed.Size != int64(len(data)) {

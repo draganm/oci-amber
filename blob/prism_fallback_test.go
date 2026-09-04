@@ -15,8 +15,8 @@ import (
 	"testing"
 	"time"
 
-	compprysm "github.com/draganm/comp-prysm"
 	tarprism "github.com/draganm/tar-prism"
+	zrecipe "github.com/draganm/zrecipe"
 
 	"github.com/draganm/oci-amber/oci"
 	"github.com/draganm/oci-amber/store"
@@ -160,7 +160,7 @@ func TestPutLargeLayerSpillsAndCleansUp(t *testing.T) {
 
 func TestPutRoundTripFailureStoresRaw(t *testing.T) {
 	orig := roundTripCheck
-	roundTripCheck = func(ctx context.Context, b *Store, src *amberSource, params *compprysm.Params, want oci.Digest) error {
+	roundTripCheck = func(ctx context.Context, b *Store, src *amberSource, params *zrecipe.Params, want oci.Digest) error {
 		return errors.New("forced round-trip failure")
 	}
 	t.Cleanup(func() { roundTripCheck = orig })
@@ -208,7 +208,7 @@ func TestPutRoundTripFailureStoresRaw(t *testing.T) {
 func TestRoundTripCheckObeysVerifyOption(t *testing.T) {
 	calls := 0
 	orig := roundTripCheck
-	roundTripCheck = func(ctx context.Context, b *Store, src *amberSource, params *compprysm.Params, want oci.Digest) error {
+	roundTripCheck = func(ctx context.Context, b *Store, src *amberSource, params *zrecipe.Params, want oci.Digest) error {
 		calls++
 		return orig(ctx, b, src, params, want)
 	}
@@ -245,9 +245,9 @@ func TestRoundTripCheckObeysVerifyOption(t *testing.T) {
 // independent ReadParams decode of the comp.json that Put actually left in
 // the store.
 func TestRoundTripCheckUsesStoredCompParams(t *testing.T) {
-	var got *compprysm.Params
+	var got *zrecipe.Params
 	orig := roundTripCheck
-	roundTripCheck = func(ctx context.Context, b *Store, src *amberSource, params *compprysm.Params, want oci.Digest) error {
+	roundTripCheck = func(ctx context.Context, b *Store, src *amberSource, params *zrecipe.Params, want oci.Digest) error {
 		got = params
 		return orig(ctx, b, src, params, want)
 	}
@@ -283,7 +283,7 @@ func TestPutContextCancelledDuringPrismFails(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	orig := roundTripCheck
-	roundTripCheck = func(context.Context, *Store, *amberSource, *compprysm.Params, oci.Digest) error {
+	roundTripCheck = func(context.Context, *Store, *amberSource, *zrecipe.Params, oci.Digest) error {
 		cancel()
 		return errors.New("client went away")
 	}
