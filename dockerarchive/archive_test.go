@@ -43,6 +43,9 @@ func TestOpenIndexesBlobsAndReadsTopFiles(t *testing.T) {
 	if len(a.Legacy) != 1 || a.Legacy[0].RepoTags[0] != "app:v1" || a.Legacy[0].Config != "blobs/sha256/"+oci.DigestOfBytes([]byte(`{"os":"linux"}`)).Hex() {
 		t.Fatalf("legacy = %+v", a.Legacy)
 	}
+	if a.LayoutVersion != "1.0.0" {
+		t.Fatalf("LayoutVersion = %q, want 1.0.0", a.LayoutVersion)
+	}
 	ld := oci.DigestOfBytes(layer)
 	if !a.Has(ld) {
 		t.Fatal("layer not indexed")
@@ -121,7 +124,7 @@ func TestVerifyAcceptsGoodBlobAndObeysContext(t *testing.T) {
 	}
 }
 
-func TestOpenIgnoresUnrelatedEntriesAndDotSlash(t *testing.T) {
+func TestOpenNormalisesDotSlashPrefix(t *testing.T) {
 	// Some tar writers prefix names with "./"; the reader must normalise.
 	b := archivetest.New()
 	d := b.AddBlob([]byte("payload"))
@@ -136,6 +139,71 @@ func TestOpenIgnoresUnrelatedEntriesAndDotSlash(t *testing.T) {
 	defer a.Close()
 	if !a.Has(d) {
 		t.Fatal("./-prefixed blob not indexed")
+	}
+}
+
+func TestOpenIgnoresUnrelatedFilesAndNonHexBlobNames(t *testing.T) {
+	b := archivetest.New()
+	d := b.AddBlob([]byte("payload"))
+	b.Top()
+	raw := b.Bytes()
+	extended := appendEntries(t, raw, []namedEntry{
+		{name: "README", data: []byte("hello")},
+		{name: "blobs/sha256/not-hex", data: []byte("junk")},
+	})
+	path := writeTemp(t, extended)
+	a, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	if !a.Has(d) {
+		t.Fatal("real blob not indexed")
+	}
+}
+
+func TestOpenReportsTruncatedArchive(t *testing.T) {
+	b := archivetest.New()
+	// A blob large enough that the cut below lands well inside its content,
+	// with plenty of bytes still missing before the next header.
+	b.AddBlob(bytes.Repeat([]byte("x"), 4096))
+	b.Top()
+	raw := b.Bytes()
+
+	off, size := blobContentSpan(t, raw)
+	if size < 2 {
+		t.Fatal("blob too small to truncate meaningfully")
+	}
+	truncated := raw[:off+size/2]
+	path := writeTemp(t, truncated)
+
+	_, err := Open(path)
+	if err == nil {
+		t.Fatal("Open on a truncated archive should fail")
+	}
+	if !strings.Contains(err.Error(), "reading tar") {
+		t.Fatalf("err = %v, want it to mention reading tar", err)
+	}
+}
+
+func TestOpenRejectsOversizedTopFile(t *testing.T) {
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+	// A header claiming more bytes than actually follow: readTop must
+	// reject it by size before ever trying to read the body.
+	if err := tw.WriteHeader(&tar.Header{
+		Name:     IndexFile,
+		Typeflag: tar.TypeReg,
+		Mode:     0o644,
+		Size:     maxTopFile + 1,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	path := writeTemp(t, buf.Bytes())
+
+	_, err := Open(path)
+	if err == nil || !strings.Contains(err.Error(), "more than") {
+		t.Fatalf("Open on an oversized index.json: %v", err)
 	}
 }
 
@@ -172,4 +240,67 @@ func writeTemp(t *testing.T, data []byte) string {
 		t.Fatal(err)
 	}
 	return path
+}
+
+// namedEntry is one extra regular-file entry for appendEntries.
+type namedEntry struct {
+	name string
+	data []byte
+}
+
+// appendEntries re-encodes data's tar, unchanged, then appends extra as
+// further regular-file entries.
+func appendEntries(t *testing.T, data []byte, extra []namedEntry) []byte {
+	t.Helper()
+	var out bytes.Buffer
+	tw := tar.NewWriter(&out)
+	tr := tar.NewReader(bytes.NewReader(data))
+	for {
+		h, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := tw.WriteHeader(h); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := io.Copy(tw, tr); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, e := range extra {
+		if err := tw.WriteHeader(&tar.Header{Name: e.name, Typeflag: tar.TypeReg, Mode: 0o644, Size: int64(len(e.data))}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tw.Write(e.data); err != nil {
+			t.Fatal(err)
+		}
+	}
+	tw.Close()
+	return out.Bytes()
+}
+
+// blobContentSpan returns the offset and size of the first blobs/sha256
+// entry's content in raw, using the same reader-offset trick Open uses
+// (archive/tar seeks past content when the reader is an io.Seeker, so the
+// reader's offset right after Next is the entry's first content byte).
+func blobContentSpan(t *testing.T, raw []byte) (off, size int64) {
+	t.Helper()
+	r := bytes.NewReader(raw)
+	tr := tar.NewReader(r)
+	for {
+		h, err := tr.Next()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if h.Typeflag == tar.TypeReg && strings.HasPrefix(h.Name, blobPrefix) {
+			pos, err := r.Seek(0, io.SeekCurrent)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return pos, h.Size
+		}
+	}
 }

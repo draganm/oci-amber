@@ -58,12 +58,17 @@ type Archive struct {
 	blobs  map[oci.Digest]section
 	Index  *oci.Manifest // index.json
 	Legacy []LegacyEntry // manifest.json; nil when absent
+
+	// LayoutVersion is the imageLayoutVersion from oci-layout, "" when the
+	// archive has none. A missing oci-layout is not an error; index.json is
+	// the gate for what counts as a readable archive.
+	LayoutVersion string
 }
 
 // Open opens the archive at path and scans its headers once: every
-// blobs/sha256/<hex> regular file is recorded by offset and size,
-// index.json and manifest.json are read whole. The file stays open until
-// Close.
+// blobs/sha256/<hex> regular file is recorded by offset and size, and
+// index.json, manifest.json and oci-layout are read whole. The file stays
+// open until Close.
 func Open(path string) (*Archive, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -83,7 +88,7 @@ func Open(path string) (*Archive, error) {
 func scan(f *os.File) (*Archive, error) {
 	a := &Archive{f: f, blobs: make(map[oci.Digest]section)}
 	tr := tar.NewReader(f)
-	var index, legacy []byte
+	var index, legacy, layout []byte
 	for {
 		h, err := tr.Next()
 		if err == io.EOF {
@@ -105,6 +110,10 @@ func scan(f *os.File) (*Archive, error) {
 			if legacy, err = readTop(tr, name, h.Size); err != nil {
 				return nil, err
 			}
+		case name == LayoutFile:
+			if layout, err = readTop(tr, name, h.Size); err != nil {
+				return nil, err
+			}
 		case strings.HasPrefix(name, blobPrefix):
 			hex := name[len(blobPrefix):]
 			d, err := oci.ParseDigest("sha256:" + hex)
@@ -115,6 +124,9 @@ func scan(f *os.File) (*Archive, error) {
 			if err != nil {
 				return nil, fmt.Errorf("dockerarchive: locating %s: %w", name, err)
 			}
+			// A repeated blobs/sha256/<hex> name overwrites the earlier
+			// record (last-write-wins); the digest check ReadBlob/Verify
+			// run before use catches a wrong body either way.
 			a.blobs[d] = section{off: off, size: h.Size}
 		}
 	}
@@ -133,6 +145,15 @@ func scan(f *os.File) (*Archive, error) {
 		if err := json.Unmarshal(legacy, &a.Legacy); err != nil {
 			return nil, fmt.Errorf("dockerarchive: %s: %w", ManifestFile, err)
 		}
+	}
+	if layout != nil {
+		var l struct {
+			ImageLayoutVersion string `json:"imageLayoutVersion"`
+		}
+		if err := json.Unmarshal(layout, &l); err != nil {
+			return nil, fmt.Errorf("dockerarchive: %s: %w", LayoutFile, err)
+		}
+		a.LayoutVersion = l.ImageLayoutVersion
 	}
 	return a, nil
 }
