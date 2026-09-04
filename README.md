@@ -314,6 +314,14 @@ removes one.
   produces); v0.2.0 fixed it and the crane smoke test now asserts such a
   layer becomes a prism. `docs/zrecipe-zlib-level0-roundtrip.md` records the
   investigation.
+- Layers written by umoci and rockcraft (Canonical's rocks on Docker Hub,
+  `ubuntu` included) are klauspost pgzip streams over an old klauspost
+  encoder; zrecipe v0.2.0 stored them raw as `not-reproducible`, v0.3.0
+  reproduces them with its `pgzip` engine
+  ([zrecipe#2](https://github.com/draganm/zrecipe/issues/2)). A blob is
+  classified once: a layer stored raw by an earlier binary stays raw, and
+  gets no rootfs view, until `DELETE /v2/<name>/blobs/<digest>` removes it
+  and the image is pushed again.
 
 ## Development
 
