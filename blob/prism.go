@@ -95,6 +95,11 @@ func (c *byteCounter) Read(p []byte) (int, error) {
 // format pass one detected: klauspost gzip, klauspost zstd bounded like
 // comp-prysm's own first pass, or r itself for "none". Closing it does not
 // close r.
+//
+// The zstd decoder's max window matches maxZstdWindow (analyze.go): analyze
+// already turns away any frame that declares a bigger window before this is
+// ever called, so the bound here is a second, independent guard against
+// this decoder ever growing a window buffer past what the store accepts.
 func newDecompressor(format compprysm.Format, r io.Reader) (io.ReadCloser, error) {
 	switch format {
 	case compprysm.FormatGzip:
@@ -104,7 +109,7 @@ func newDecompressor(format compprysm.Format, r io.Reader) (io.ReadCloser, error
 		}
 		return zr, nil
 	case compprysm.FormatZstd:
-		dec, err := zstd.NewReader(r, zstd.WithDecoderConcurrency(1), zstd.WithDecoderMaxWindow(1<<31))
+		dec, err := zstd.NewReader(r, zstd.WithDecoderConcurrency(1), zstd.WithDecoderMaxWindow(maxZstdWindow))
 		if err != nil {
 			return nil, err
 		}

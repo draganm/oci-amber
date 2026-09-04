@@ -428,6 +428,47 @@ func TestPutZstdTarRoundTrips(t *testing.T) {
 	assertSpoolDirEmpty(t, b)
 }
 
+// zstdHugeWindowFrame hand-builds a minimal, empty zstd frame whose window
+// descriptor declares a 256 MiB window: magic, a frame header descriptor
+// with every flag clear (so a window descriptor byte follows and no
+// content-size field does), the window descriptor byte itself (exponent 18,
+// mantissa 0), and one empty last raw block. No encoder is asked to
+// actually fill such a window; this exercises exactly the frame-header
+// field blob.zstdWindowSize reads.
+func zstdHugeWindowFrame() []byte {
+	return []byte{
+		0x28, 0xb5, 0x2f, 0xfd, // zstd magic
+		0x00,             // frame header descriptor: no flags set
+		0x90,             // window descriptor: exponent=18 -> window = 2^28 = 256 MiB
+		0x01, 0x00, 0x00, // block header: last block, raw, size 0
+	}
+}
+
+// TestPutZstdHugeWindowStoresRawUnsupported covers the window-size guard in
+// analyze.go: a zstd frame declaring a window past maxZstdWindow is
+// classified before Analyze (and before any decompression) is attempted,
+// so a hostile or oversized frame never grows a decoder window buffer past
+// the configured bound.
+func TestPutZstdHugeWindowStoresRawUnsupported(t *testing.T) {
+	b, _, logs := newTestStore(t, Options{VerifyRoundTrip: true})
+	data := zstdHugeWindowFrame()
+	meta := putPrism(t, b, data)
+	if meta.Kind != KindRaw || meta.RawReason != ReasonUnsupported {
+		t.Fatalf("kind/reason = %q/%q, want raw/%s", meta.Kind, meta.RawReason, ReasonUnsupported)
+	}
+	if meta.Format != "zstd" {
+		t.Errorf("format = %q, want zstd", meta.Format)
+	}
+	got, _ := pullPrism(t, b, meta.Digest)
+	if !bytes.Equal(got, data) {
+		t.Fatalf("pulled %d bytes differ from the %d pushed", len(got), len(data))
+	}
+	assertSpoolDirEmpty(t, b)
+	if out := logs.String(); !strings.Contains(out, "window_size=268435456") {
+		t.Errorf("log lacks the declared window size:\n%s", out)
+	}
+}
+
 func TestPutUncompressedTarIsPrism(t *testing.T) {
 	b, _, _ := newTestStore(t, Options{VerifyRoundTrip: true})
 	files := prismFixtureFiles(t)

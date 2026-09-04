@@ -1,6 +1,7 @@
 package blob
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"strings"
 
 	compprysm "github.com/draganm/comp-prysm"
+	cpformat "github.com/draganm/comp-prysm/format"
 
 	"github.com/draganm/oci-amber/upload"
 )
@@ -24,6 +26,11 @@ type decision struct {
 
 // tarHeaderSize is one tar block; the first block of a tar is a header.
 const tarHeaderSize = 512
+
+// maxZstdWindow is the largest zstd window this store will decompress. Both
+// this check and newDecompressor's zstd.WithDecoderMaxWindow enforce it, so
+// a frame that declares a bigger window is never decompressed at all.
+const maxZstdWindow = 128 << 20
 
 // spoolDir is the directory comp-prysm spills its decompressed spool to.
 func (b *Store) spoolDir() string { return filepath.Join(b.opts.WorkDir, spoolDirName) }
@@ -51,6 +58,23 @@ func (b *Store) analyze(ctx context.Context, sp *upload.Spool) (decision, error)
 		return decision{}, fmt.Errorf("blob: detecting format: %w", err)
 	}
 	format := string(f)
+
+	// A zstd frame that declares a window past what this store will ever
+	// decompress is decided from its header alone, before anything is
+	// decompressed: parsing costs a handful of bytes, where letting
+	// newDecompressor's bounded decoder discover the same fact mid-probe or
+	// mid-Analyze would mean it already started reading compressed data
+	// under a window budget it cannot honor.
+	if f == compprysm.FormatZstd {
+		windowSize, err := zstdWindowSize(r)
+		if err == nil && windowSize > maxZstdWindow {
+			b.log.Info("zstd window exceeds limit, storing raw",
+				"window_size", windowSize, "limit", int64(maxZstdWindow))
+			return decision{kind: KindRaw, reason: ReasonUnsupported, format: format}, nil
+		}
+		// A header that cannot be parsed decides nothing: Analyze runs and
+		// reports its own corrupt/unsupported classification.
+	}
 
 	// A compressed blob whose first decompressed block is not a tar header
 	// can never become a prism, so decide it here rather than after a full
@@ -132,6 +156,21 @@ func startsWithCompressedTarHeader(r io.ReadSeeker, f compprysm.Format) (bool, e
 		return false, err
 	}
 	return isTarHeader(hdr[:]), nil
+}
+
+// zstdWindowSize parses the zstd frame header of r and returns its declared
+// window size, without decompressing anything. It rewinds r first; Analyze
+// and the other probes rewind it themselves before use, so the position
+// left behind does not matter.
+func zstdWindowSize(r io.ReadSeeker) (uint64, error) {
+	if _, err := r.Seek(0, io.SeekStart); err != nil {
+		return 0, err
+	}
+	h, err := cpformat.ParseZstdFrameHeader(bufio.NewReader(r))
+	if err != nil {
+		return 0, err
+	}
+	return h.WindowSize, nil
 }
 
 // startsWithTarHeader reports whether r begins with a tar header block
