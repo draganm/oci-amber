@@ -294,10 +294,16 @@ func putRawGzipCase(t *testing.T, name string, data []byte, reason RawReason) {
 }
 
 func TestPutGzipFallbacks(t *testing.T) {
-	p1, p2 := textBytes(4096, 11), textBytes(4096, 12)
-	putRawGzipCase(t, "non-reproducible", twoLevelGzip(t, p1, p2), ReasonNotReproducible)
-	putRawGzipCase(t, "corrupt trailer", corruptGzipCRC(gzipBytes(t, tarBytes(t, "etc/motd", p1), gzip.DefaultCompression)), ReasonCorrupt)
-	putRawGzipCase(t, "multi-member", slices.Concat(gzipBytes(t, p1, gzip.BestSpeed), gzipBytes(t, p2, gzip.BestSpeed)), ReasonUnsupported)
+	// The decompressed stream must start with a valid tar header, or the
+	// blob/analyze.go tar probe now classifies it not-tar before these
+	// fixtures ever reach the Analyze failure they are meant to exercise
+	// (see TestPutTruncatedTarStoresRawDecomposeFailed for the same fix
+	// applied to the decompose-failed case).
+	tarData := tarBytes(t, "etc/motd", textBytes(4096, 11))
+	tp1, tp2 := tarData[:len(tarData)/2], tarData[len(tarData)/2:]
+	putRawGzipCase(t, "non-reproducible", twoLevelGzip(t, tp1, tp2), ReasonNotReproducible)
+	putRawGzipCase(t, "corrupt trailer", corruptGzipCRC(gzipBytes(t, tarData, gzip.DefaultCompression)), ReasonCorrupt)
+	putRawGzipCase(t, "multi-member", slices.Concat(gzipBytes(t, tp1, gzip.BestSpeed), gzipBytes(t, tp2, gzip.BestSpeed)), ReasonUnsupported)
 }
 
 func TestPutAnalyzeTimeoutStoresRaw(t *testing.T) {

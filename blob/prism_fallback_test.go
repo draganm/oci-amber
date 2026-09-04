@@ -282,10 +282,72 @@ func TestPutPrismAnalyzeTimeoutStoresRaw(t *testing.T) {
 	}
 }
 
-func TestPutGzipNonTarStoresRawDecomposeFailed(t *testing.T) {
-	b, _, logs := newTestStore(t, Options{VerifyRoundTrip: true})
+// TestPutCompressedNonTarStoresRawNotTar covers the tar probe that runs
+// before Analyze: a compressed blob that is not a tar (an oras-pushed SBOM,
+// a gzipped config, a model shard) can never become a prism, so it is
+// classified raw with reason not-tar straight away instead of paying the
+// full candidate search, a doomed pass two and an error-level log line.
+func TestPutCompressedNonTarStoresRawNotTar(t *testing.T) {
 	payload := bytes.Repeat([]byte(`{"architecture":"amd64","os":"linux","config":{"Env":["PATH=/usr/bin"]}}`+"\n"), 64)
-	data := gzipBytes(t, payload, gzip.DefaultCompression)
+	for _, c := range []struct {
+		name   string
+		data   []byte
+		format string
+	}{
+		{"gzip", gzipBytes(t, payload, gzip.DefaultCompression), "gzip"},
+		{"zstd", prismZstd(t, payload), "zstd"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			b, _, logs := newTestStore(t, Options{VerifyRoundTrip: true})
+			meta := putPrism(t, b, c.data)
+			if meta.Kind != KindRaw || meta.RawReason != ReasonNotTar {
+				t.Fatalf("kind/reason = %q/%q, want raw/%s", meta.Kind, meta.RawReason, ReasonNotTar)
+			}
+			if meta.Format != c.format {
+				t.Errorf("format = %q, want %s", meta.Format, c.format)
+			}
+			if meta.DiffID != "" || meta.Entries != 0 || meta.Engine != "" || meta.EngineVersion != "" {
+				t.Errorf("raw blob carries prism-only fields: %+v", *meta)
+			}
+			got, _ := pullPrism(t, b, meta.Digest)
+			if !bytes.Equal(got, c.data) {
+				t.Fatalf("pulled %d bytes differ from the %d pushed", len(got), len(c.data))
+			}
+			assertSpoolDirEmpty(t, b)
+			out := logs.String()
+			if strings.Contains(out, "level=ERROR") {
+				t.Errorf("a non-tar artifact was logged at error level:\n%s", out)
+			}
+			if strings.Contains(out, "decompose failed") {
+				t.Errorf("pass two ran on a non-tar artifact:\n%s", out)
+			}
+			if !strings.Contains(out, "raw_reason=not-tar") {
+				t.Errorf("log output lacks the raw reason:\n%s", out)
+			}
+
+			// The probe runs before Analyze: with a one-nanosecond analyze
+			// deadline the blob would otherwise come out analyze-timeout.
+			quick, _, _ := newTestStore(t, Options{VerifyRoundTrip: true, AnalyzeTimeout: time.Nanosecond})
+			if m := putPrism(t, quick, c.data); m.Kind != KindRaw || m.RawReason != ReasonNotTar {
+				t.Fatalf("with a 1 ns analyze deadline: kind/reason = %q/%q, want raw/%s (Analyze must not run)", m.Kind, m.RawReason, ReasonNotTar)
+			}
+		})
+	}
+}
+
+// TestPutTruncatedTarStoresRawDecomposeFailed keeps the decompose-failure
+// path covered now that a compressed non-tar never reaches it: this stream
+// does start with a valid tar header, so it passes the probe and Analyze,
+// and only tar-prism finds it broken part way through.
+func TestPutTruncatedTarStoresRawDecomposeFailed(t *testing.T) {
+	full := tarBytes(t, "usr/lib/app", textBytes(8<<10, 3))
+	truncated := full[:tarHeaderSize+1024] // the header plus part of the content
+	if !isTarHeader(truncated[:tarHeaderSize]) {
+		t.Fatal("the fixture must start with a valid tar header, or it would be classified not-tar")
+	}
+	data := gzipBytes(t, truncated, gzip.DefaultCompression)
+
+	b, _, logs := newTestStore(t, Options{VerifyRoundTrip: true})
 	meta := putPrism(t, b, data)
 	if meta.Kind != KindRaw || meta.RawReason != ReasonDecomposeFailed {
 		t.Fatalf("kind/reason = %q/%q, want raw/%s", meta.Kind, meta.RawReason, ReasonDecomposeFailed)

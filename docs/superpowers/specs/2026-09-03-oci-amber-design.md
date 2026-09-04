@@ -268,6 +268,12 @@ body has been appended, and on a monolithic `POST ?digest=`.
    --analyze-parallelism (default 2)})` under a child context with
    `--analyze-timeout` (default 15 min). No `Uncompressed` sink is attached.
 5. **Classify.**
+   - Before step 4 runs: a gzip or zstd stream (`Detect`) whose first 512
+     decompressed bytes are not a tar header with a valid checksum is raw
+     with reason `not-tar`; the engine search and pass two are skipped
+     entirely. The probe is a bounded klauspost read of one block, nothing
+     is spooled, and a probe that cannot read the stream decides nothing
+     (Analyze runs and classifies it).
    - `Params.Format` gzip or zstd with an engine: prism candidate.
    - `Params.Format == none`: prism candidate only if the first 512 bytes are
      a tar header with a valid checksum; otherwise raw with reason `not-tar`.
@@ -597,7 +603,7 @@ and source; oci-amber then requires that version.
 | Situation | Outcome |
 |---|---|
 | comp-prysm `ErrNotReproducible`, `ErrUnsupported`, `ErrCorrupt`, non-tar `none`, analyze deadline | stored raw, reason recorded, `201` |
-| second-pass digest mismatch, tar-prism decompose error, round-trip failure | stored raw, reason recorded, error-level log for the last two, `201` |
+| second-pass digest mismatch, tar-prism decompose error, round-trip failure | stored raw, reason recorded, error-level log for the last two, `201`. A compressed blob that is not a tar never reaches this row: step 5 classifies it `not-tar` before the engine search, so the error level is reserved for archives that really did look decomposable |
 | amber write error, I/O error on the spool, request context cancelled during finalize | `500`, session retained for retry, nothing published |
 | ref publish error | `500`, objects left for GC |
 | pull-side compose/recompress error or digest mismatch | connection aborted, error-level log |

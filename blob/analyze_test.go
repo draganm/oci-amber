@@ -50,7 +50,11 @@ func TestAnalyzeClassifies(t *testing.T) {
 	b, _, _ := newTestStore(t, Options{})
 	ctx := context.Background()
 	tarData := tarBytes(t, "etc/motd", textBytes(3000, 5))
-	p1, p2 := textBytes(4096, 1), textBytes(4096, 2)
+	// The two gzip fixtures below must carry a tar, or the tar probe would
+	// classify them not-tar before Analyze ever sees them; splitting one
+	// tar in half keeps them exercising the Analyze error classification.
+	p1, p2 := tarData[:len(tarData)/2], tarData[len(tarData)/2:]
+	jsonConfig := []byte(`{"architecture":"amd64","os":"linux"}`)
 	cases := []struct {
 		name   string
 		data   []byte
@@ -59,7 +63,8 @@ func TestAnalyzeClassifies(t *testing.T) {
 		format string
 		engine bool
 	}{
-		{"json config", []byte(`{"architecture":"amd64","os":"linux"}`), KindRaw, ReasonNotTar, "none", false},
+		{"json config", jsonConfig, KindRaw, ReasonNotTar, "none", false},
+		{"gzipped json config", gzipBytes(t, bytes.Repeat(jsonConfig, 64), gzip.DefaultCompression), KindRaw, ReasonNotTar, "gzip", false},
 		{"empty", nil, KindRaw, ReasonNotTar, "none", false},
 		{"plain tar", tarData, KindPrism, "", "none", false},
 		{"go gzip tar", gzipBytes(t, tarData, gzip.DefaultCompression), KindPrism, "", "gzip", true},

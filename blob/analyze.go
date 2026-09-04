@@ -52,6 +52,21 @@ func (b *Store) analyze(ctx context.Context, sp *upload.Spool) (decision, error)
 	}
 	format := string(f)
 
+	// A compressed blob whose first decompressed block is not a tar header
+	// can never become a prism, so decide it here rather than after a full
+	// engine search and a pass two that tar-prism is bound to reject (spec
+	// "Blob finalization" step 5). The probe decompresses one 512-byte
+	// block through klauspost; nothing is spooled.
+	if f != compprysm.FormatNone {
+		ok, err := startsWithCompressedTarHeader(r, f)
+		if err == nil && !ok {
+			return decision{kind: KindRaw, reason: ReasonNotTar, format: format}, nil
+		}
+		// A probe that could not read the stream decides nothing: Analyze
+		// runs and reports a corrupt or unsupported stream with its own
+		// reason, or fails the upload on a spool I/O error.
+	}
+
 	actx, cancel := context.WithTimeout(ctx, b.opts.AnalyzeTimeout)
 	defer cancel()
 	params, err := compprysm.Analyze(actx, r, &compprysm.Options{
@@ -91,6 +106,32 @@ func (b *Store) analyze(ctx context.Context, sp *upload.Spool) (decision, error)
 		}
 	}
 	return decision{kind: KindPrism, params: params, format: format}, nil
+}
+
+// startsWithCompressedTarHeader reports whether the first 512 decompressed
+// bytes of r are a tar header block. It rewinds r and reads through a
+// klauspost decompressor for f, which pulls only as much of the compressed
+// stream as that one block needs; nothing is written to disk. Analyze
+// rewinds r itself (its Detect does), so the position left behind does not
+// matter. A stream with fewer than 512 decompressed bytes is not a tar; any
+// other failure returns an error and decides nothing.
+func startsWithCompressedTarHeader(r io.ReadSeeker, f compprysm.Format) (bool, error) {
+	if _, err := r.Seek(0, io.SeekStart); err != nil {
+		return false, err
+	}
+	dec, err := newDecompressor(f, r)
+	if err != nil {
+		return false, err
+	}
+	defer dec.Close()
+	var hdr [tarHeaderSize]byte
+	if _, err := io.ReadFull(dec, hdr[:]); err != nil {
+		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+			return false, nil
+		}
+		return false, err
+	}
+	return isTarHeader(hdr[:]), nil
 }
 
 // startsWithTarHeader reports whether r begins with a tar header block
