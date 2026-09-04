@@ -25,8 +25,8 @@ Every pushed container image also gets a root filesystem view: the layers
 applied in order with OCI whiteout semantics, stored in the image root as
 an amber directory tree whose regular files point at the content the layers
 already hold. Building it replays tar headers from the stored recipes and
-never reads file contents. It is the substrate for browsing an image and
-serving parts of it without rebuilding a layer.
+reads at most a block of file content. It is the substrate for browsing an
+image and serving parts of it without rebuilding a layer.
 
 ## Requirements
 
@@ -123,17 +123,18 @@ OCI or Docker image config) also holds `rootfs/`, the root filesystem the
 layers produce: a plain amber directory tree with the tar's modes,
 ownership, mtimes, symlinks, hard links, device nodes, FIFOs and extended
 attributes, whose regular files point at the content the layers' prisms
-already store, so it adds directory objects only and amber's own tools can
-export or restore it. Its `meta.json` carries a `rootfs` object with
+already store, so it adds only directory objects and spilled xattr sets,
+and amber's own tools can export or restore it. Its `meta.json` carries a
+`rootfs` object with
 `status` (`ok`, `partial`, `unavailable` or `not-applicable`) and `entries`;
 `partial` lists the first 100 skipped entries with their layer, path and
 reason plus `skippedCount`, `unavailable` gives the `reason`. A raw layer or
 one whose headers `archive/tar` rejects makes the rootfs unavailable; a
 sparse file, a path escaping the root, a hard link without a target or a
 type tar cannot place is skipped. The push succeeds either way. Indexes and
-artifacts have no rootfs; re-pushing a manifest reuses the one already
-stored under its digest, and the same image in two repositories shares
-every rootfs object.
+artifacts have no rootfs; re-pushing a manifest reuses the tree already
+stored under its digest (an unavailable one is tried again), and the same
+image in two repositories shares every rootfs object.
 
 ## HTTP surface
 

@@ -132,3 +132,5 @@ Deferred from `docs/superpowers/specs/2026-09-04-rootfs-view-design.md`:
 - Metadata for the rootfs root directory itself (amber roots carry none).
 - PAX sparse 1.0 maps are served for real from the content region so the layer parses; the entry is still skipped. Representing sparse files would need the holes expanded into the CAS.
 - `image.Meta.Rootfs.Entries` is always present (0 without a tree) rather than omitted, so an empty rootfs is distinguishable from an absent field in JSON without a pointer.
+- Stores written before this change hold Docker's empty layer (a gzipped empty tar) as raw `not-tar`; an image referencing it reports `unavailable` until that blob is deleted and pushed again, after which the next manifest push builds the view (an unavailable rootfs is never reused).
+- The merge tree and each layer's parsed entry list live in memory under the repository lock, proportional to the merged entry count; a hard cap (`unavailable: too many entries`) would bound a crafted push cheaply.

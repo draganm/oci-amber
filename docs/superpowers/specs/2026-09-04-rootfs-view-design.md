@@ -157,12 +157,13 @@ the entry.
 
 ### Whiteouts
 
-A regular file named `.wh.<name>` is a whiteout: it removes `<name>` from
-the directory it is in, whatever `<name>` is (a file, a symlink, a whole
-subtree). `.wh..wh..opq` is an opaque whiteout: it removes every child of
-its directory. Both resolve their directory the same way as parents above.
-Whiteouts never appear in the tree, and a whiteout for something that does
-not exist is a no-op.
+An entry of any type named `.wh.<name>` is a whiteout: it removes `<name>`
+from the directory it is in, whatever `<name>` is (a file, a symlink, a
+whole subtree). `.wh..wh..opq` is an opaque whiteout: it removes every
+child of its directory. Both resolve their directory the same way as
+parents above. Whiteouts never appear in the tree, a whiteout for something
+that does not exist is a no-op, and a whiteout with an empty name (`.wh.`
+alone) is skipped.
 
 ### Skips
 
@@ -244,10 +245,12 @@ import `blob`.
 ### `rootfs` (new)
 
 ```go
-// Layer is what the builder needs from a stored prism.
+// Layer is what the builder needs from a stored prism. Blob serves the
+// content archive/tar reads at the start of a region (a PAX sparse map).
 type Layer interface {
     Index() (*tarprism.Index, error)
     Recipe() (io.ReadCloser, error)
+    Blob(index int, entry tarprism.Entry) (io.ReadCloser, error)
     BlobKey(index int, entry tarprism.Entry) (key.Key, error)
 }
 
@@ -322,10 +325,14 @@ Files: `layer.go` (virtual tar reader, header to entry conversion),
 - `Put`, for an applicable manifest, between blob resolution and the
   manifest's own objects:
   1. If `oci/manifest/<repo>/<digest>` already resolves to a root whose
-     meta carries a `rootfs` field, reuse that field and, for `ok` and
-     `partial`, the existing `rootfs/` key. Nothing is rebuilt on a re-push.
-  2. Otherwise open every layer blob. A raw one sets `unavailable` with its
-     reason and stops.
+     meta carries a `rootfs` field with status `ok` or `partial`, reuse
+     that field and the existing `rootfs/` key. Nothing is rebuilt on a
+     re-push. An `unavailable` rootfs is built again: the raw layer that
+     caused it may have been deleted and pushed as a prism since.
+  2. Otherwise open every layer blob. A blob that vanished since the
+     manifest was validated is `CodeManifestBlobUnknown`, like a missing
+     one during validation. A raw one sets `unavailable` with its reason
+     and stops.
   3. Otherwise apply the layers through a `rootfs.Builder` and write the
      tree through the pass-one writer. A `*rootfs.LayerError` sets
      `unavailable` with `layer <digest>: <error>`; any other error fails
@@ -419,3 +426,9 @@ Recorded while implementing (2026-09-04):
 - Test fixtures confirmed that `archive/tar` treats a hard link's size field
   as zero, exactly as "Known limits" says; the rootfs and image tests craft
   such an archive to prove the `unavailable` path.
+- An entry skipped after its parents were resolved (a `symlink loop`) can
+  leave an implicit directory behind, created while resolving the path.
+  It is empty and harmless.
+- `image` logs `rootfs built` at Debug level with the layer count, entries,
+  skips and duration, so a reuse on re-push is observable as the absence
+  of that line.
