@@ -218,6 +218,70 @@ func TestUploadMonolithicPost(t *testing.T) {
 	assertNoWorkFiles(t, e)
 }
 
+// assertDedupHit checks that exactly one "blob already present" line and
+// no "blob stored" line beyond the ones the setup produced were logged, and
+// that the stored blob still serves data.
+func assertDedupHit(t *testing.T, e *testEnv, d oci.Digest, data []byte, storedBefore int) {
+	t.Helper()
+	if n := e.records.count("blob already present"); n != 1 {
+		t.Errorf("logged %d \"blob already present\" lines, want 1", n)
+	}
+	if n := e.records.count("blob stored"); n != storedBefore {
+		t.Errorf("logged %d \"blob stored\" lines, want %d: the upload must not be ingested", n, storedBefore)
+	}
+	resp := e.do(t, http.MethodGet, "/v2/"+repo+"/blobs/"+d.String(), nil, nil)
+	assertStatus(t, resp, http.StatusOK)
+	if !bytes.Equal(resp.body, data) {
+		t.Error("the stored blob changed")
+	}
+}
+
+// A monolithic POST whose digest is already stored is answered before its
+// body is read: the body is garbage that would otherwise fail the digest
+// check with 400, and it is larger than what net/http drains after an
+// early response, so the server closes the connection behind the 201.
+func TestUploadMonolithicPostSkipsKnownDigest(t *testing.T) {
+	e := newTestEnv(t)
+	data := largeRawFixture()
+	d := e.putBlob(t, data)
+	garbage := randomBytes(11, 300<<10)
+
+	resp := e.do(t, http.MethodPost, "/v2/"+repo+"/blobs/uploads/?digest="+d.String(), garbage, map[string]string{"Content-Type": "application/octet-stream"})
+	assertStatus(t, resp, http.StatusCreated)
+	assertHeader(t, resp, "Location", "/v2/"+repo+"/blobs/"+d.String())
+	assertHeader(t, resp, "Docker-Content-Digest", d.String())
+	if resp.Header.Get("Docker-Upload-UUID") != "" {
+		t.Error("a skipped upload must not open a session")
+	}
+
+	assertDedupHit(t, e, d, data, 1)
+	assertNoWorkFiles(t, e)
+}
+
+// A PUT whose digest is already stored is answered before its body is
+// read, and the session it completes is dropped together with whatever was
+// PATCHed into it.
+func TestUploadPutSkipsKnownDigest(t *testing.T) {
+	e := newTestEnv(t)
+	data := rawFixture()
+	d := e.putBlob(t, data)
+	garbage := randomBytes(13, 300<<10)
+	loc, _ := e.startUpload(t, repo)
+
+	resp := e.do(t, http.MethodPatch, loc, garbage[:100], nil)
+	assertStatus(t, resp, http.StatusAccepted)
+	resp = e.do(t, http.MethodPut, loc+"?digest="+d.String(), garbage[100:], nil)
+	assertStatus(t, resp, http.StatusCreated)
+	assertHeader(t, resp, "Location", "/v2/"+repo+"/blobs/"+d.String())
+	assertHeader(t, resp, "Docker-Content-Digest", d.String())
+
+	resp = e.do(t, http.MethodGet, loc, nil, nil)
+	assertErrorCode(t, resp, http.StatusNotFound, oci.CodeBlobUploadUnknown)
+	waitFor(t, "session locks released", func() bool { return e.sessionLocks() == 0 })
+	assertDedupHit(t, e, d, data, 1)
+	assertNoWorkFiles(t, e)
+}
+
 func TestUploadSpillsToDisk(t *testing.T) {
 	// 3 MiB through a 1 MiB in-memory limit: the session spills to
 	// <work>/uploads, the finalize reads it back, and nothing is left behind.

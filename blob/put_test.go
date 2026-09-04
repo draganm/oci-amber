@@ -109,6 +109,56 @@ func TestPutSameBlobTwiceIsDeduplicated(t *testing.T) {
 	}
 }
 
+func TestReuseKnownDigest(t *testing.T) {
+	b, _, logs := newTestStore(t, Options{})
+	data := textBytes(50000, 3)
+	d := oci.DigestOfBytes(data)
+	size := int64(len(data))
+
+	// A miss changes nothing.
+	if _, err := b.Reuse(d); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("Reuse of an unknown digest: %v, want ErrNotFound", err)
+	}
+	if _, ok := b.TakeRecent(d); ok {
+		t.Fatal("a miss must not record a recent entry")
+	}
+	if strings.Contains(logs.String(), "blob already present") {
+		t.Fatal("a miss must not log a dedup hit")
+	}
+
+	m1, err := b.Put(context.Background(), spoolOf(data))
+	if err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	if _, ok := b.TakeRecent(d); !ok {
+		t.Fatal("TakeRecent after Put")
+	}
+
+	// A hit behaves like Put's whole-blob dedup, without a spool.
+	m2, err := b.Reuse(d)
+	if err != nil {
+		t.Fatalf("Reuse: %v", err)
+	}
+	wantStats := store.Stats{LogicalBytes: size, DedupedBytes: size}
+	if m2.Stats != wantStats {
+		t.Fatalf("dedup stats = %+v, want %+v", m2.Stats, wantStats)
+	}
+	m1.Stats = wantStats
+	metaEqual(t, *m1, *m2)
+	if s, ok := b.TakeRecent(d); !ok || s != wantStats {
+		t.Fatalf("TakeRecent after Reuse = %+v, %v; want %+v", s, ok, wantStats)
+	}
+	line := logs.String()
+	for _, want := range []string{"blob already present", "digest=" + d.String(), "size=50000"} {
+		if !strings.Contains(line, want) {
+			t.Errorf("log lacks %q:\n%s", want, line)
+		}
+	}
+	if strings.Count(line, "blob stored") != 1 {
+		t.Errorf("Reuse must not ingest:\n%s", line)
+	}
+}
+
 func TestRecentTableExpires(t *testing.T) {
 	b, _, _ := newTestStore(t, Options{RecentTTL: time.Nanosecond})
 	one := []byte(`{"one":1}`)

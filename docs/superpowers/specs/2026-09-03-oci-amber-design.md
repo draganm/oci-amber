@@ -255,6 +255,18 @@ removes the session and its file.
 Runs on `PUT /v2/<name>/blobs/uploads/<id>?digest=` after the optional final
 body has been appended, and on a monolithic `POST ?digest=`.
 
+Both requests name the digest before their body, so the registry looks it
+up first (`blob.Store.Reuse`): when `oci/blob/<digest>` is published the
+answer is `201` with `Location` and `Docker-Content-Digest` right away, the
+body is left unread (net/http drains a small one and closes the connection
+behind the response for a large one), a `PUT`'s session is dropped with
+whatever was `PATCH`ed into it, and the blob is recorded in the
+recent-uploads table as fully deduplicated, with the same `blob already
+present` line step 2 logs. The client's bytes are never compared with the
+digest in that case. The lookup does not serialize on the digest: a
+finalization of the same digest still in flight is not published yet, so
+the upload proceeds and step 2 catches it.
+
 1. **Digest check.** The session's sha256 must equal the requested digest,
    else `400 DIGEST_INVALID`. Only `sha256` is accepted.
 2. **Whole-blob dedup.** If `oci/blob/<digest>` exists, the spool is discarded
@@ -412,9 +424,9 @@ against `sha256:[a-f0-9]{64}`. Invalid names are `400 NAME_INVALID`.
 | `GET /v2/` | `200`, body `{}`, `Docker-Distribution-API-Version: registry/2.0` |
 | `HEAD`/`GET /v2/<name>/blobs/<digest>` | see Pull |
 | `DELETE /v2/<name>/blobs/<digest>` | delete `oci/blob/<digest>`; `202`, or `404 BLOB_UNKNOWN` |
-| `POST /v2/<name>/blobs/uploads/` | new session: `202`, `Location: /v2/<name>/blobs/uploads/<id>`, `Range: 0-0`, `Docker-Upload-UUID`. With `?mount=<digest>[&from=…]`: `201` + `Location: /v2/<name>/blobs/<digest>` + `Docker-Content-Digest` if the blob ref exists, otherwise the normal `202`. With `?digest=` and a body: monolithic upload, finalized immediately, `201`. |
+| `POST /v2/<name>/blobs/uploads/` | new session: `202`, `Location: /v2/<name>/blobs/uploads/<id>`, `Range: 0-0`, `Docker-Upload-UUID`. With `?mount=<digest>[&from=…]`: `201` + `Location: /v2/<name>/blobs/<digest>` + `Docker-Content-Digest` if the blob ref exists, otherwise the normal `202`. With `?digest=` and a body: monolithic upload, finalized immediately, `201`; a digest that is already stored is answered `201` before the body is read. |
 | `PATCH /v2/<name>/blobs/uploads/<id>` | append body. `Content-Range` start, when present, must equal the current offset else `416 BLOB_UPLOAD_INVALID` with the current `Range`. `202` + `Range: 0-<last byte index>` (inclusive; `0-0` when empty) + `Docker-Upload-UUID`. |
-| `PUT /v2/<name>/blobs/uploads/<id>?digest=` | append optional body, finalize. `201` + `Location` + `Docker-Content-Digest`. Missing digest is `400 DIGEST_INVALID`. |
+| `PUT /v2/<name>/blobs/uploads/<id>?digest=` | append optional body, finalize. `201` + `Location` + `Docker-Content-Digest`. Missing digest is `400 DIGEST_INVALID`. A digest that is already stored is answered `201` before the body is read and the session is dropped. |
 | `GET /v2/<name>/blobs/uploads/<id>` | `204` + `Range` + `Docker-Upload-UUID` |
 | `DELETE /v2/<name>/blobs/uploads/<id>` | cancel; `204` |
 | `HEAD`/`GET /v2/<name>/manifests/<reference>` | see Pull |
