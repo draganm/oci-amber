@@ -52,6 +52,7 @@ func (b *Store) analyze(ctx context.Context, sp *upload.Spool) (decision, error)
 	if c, ok := r.(io.Closer); ok {
 		defer c.Close()
 	}
+	r = b.observeReader(sp.Digest(), r)
 
 	// Detect first so a raw fallback still records the container format.
 	f, err := zrecipe.Detect(r)

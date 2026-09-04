@@ -278,8 +278,9 @@ func (b *Store) ingestPrism(ctx context.Context, w *store.Writer, sp *upload.Spo
 	if _, err := src.Seek(0, io.SeekStart); err != nil {
 		return prismResult{}, fmt.Errorf("blob: rewinding spool: %w", err)
 	}
+	rd := b.observeReader(sp.Digest(), src)
 
-	dec, err := newDecompressor(params.Format, &spoolReader{r: src})
+	dec, err := newDecompressor(params.Format, &spoolReader{r: rd})
 	if err != nil {
 		var re *readError
 		if errors.As(err, &re) {
@@ -351,6 +352,7 @@ func classifyDecomposeError(ctx context.Context, err error) error {
 // upload must fail. Objects written before a failure are left to GC.
 func (b *Store) finalizePrism(ctx context.Context, sp *upload.Spool, params *zrecipe.Params, d oci.Digest) (prismResult, store.Stats, error) {
 	w := b.st.NewWriter(ctx)
+	b.observeStage(d, StageDecompose)
 	res, err := b.ingestPrism(ctx, w, sp, params)
 	if err != nil {
 		w.Abort()
@@ -369,6 +371,7 @@ func (b *Store) finalizePrism(ctx context.Context, sp *upload.Spool, params *zre
 		return prismResult{}, store.Stats{}, err
 	}
 	if b.opts.VerifyRoundTrip {
+		b.observeStage(d, StageVerify)
 		// Read comp.json back from the store rather than reusing the
 		// in-memory params pass one produced: the check must exercise
 		// exactly the bytes a real pull will read (spec I5).
@@ -393,7 +396,7 @@ func (b *Store) finalizePrism(ctx context.Context, sp *upload.Spool, params *zre
 // variable so tests can force a failure or count calls.
 var roundTripCheck = func(ctx context.Context, b *Store, src *Prism, params *zrecipe.Params, want oci.Digest) error {
 	h := sha256.New()
-	if err := composeRecompress(ctx, h, src, params); err != nil {
+	if err := composeRecompress(ctx, b.observeWriter(want, h), src, params); err != nil {
 		return err
 	}
 	if got := oci.DigestFromSum(h.Sum(nil)); got != want {

@@ -45,6 +45,10 @@ type Options struct {
 	MaxConcurrentFinalize int
 	VerifyRoundTrip       bool
 	RecentTTL             time.Duration
+	// Observer, when set, receives stage transitions and byte counts from
+	// Put. The registry leaves it nil; `oci-amber import` drives its
+	// progress display from it.
+	Observer Observer
 }
 
 // Store puts and serves OCI blobs in an amber store: prisms for
@@ -305,6 +309,7 @@ func (b *Store) Put(ctx context.Context, sp *upload.Spool) (*Meta, error) {
 	defer func() { <-b.finalize }()
 
 	// Steps 4 and 5: analyze and classify.
+	b.observeStage(d, StageAnalyze)
 	dec, err := b.analyze(ctx, sp)
 	if err != nil {
 		return nil, err
@@ -407,6 +412,7 @@ func (b *Store) dedupHit(existing Meta) Meta {
 // builds the blob root. The ingest runs through its own accounting writer,
 // whose Stats become meta.Stats.
 func (b *Store) finalizeRaw(ctx context.Context, sp *upload.Spool, meta Meta, reason RawReason) (key.Key, Meta, error) {
+	b.observeStage(meta.Digest, StageRaw)
 	w := b.st.NewWriter(ctx)
 	rawKey, err := b.ingestRaw(ctx, w, sp)
 	if err != nil {
