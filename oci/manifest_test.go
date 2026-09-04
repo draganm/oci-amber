@@ -398,3 +398,54 @@ func TestBlobDescriptors(t *testing.T) {
 		}
 	}
 }
+
+func TestParsePlatform(t *testing.T) {
+	cases := []struct {
+		in   string
+		want Platform
+		ok   bool
+	}{
+		{"linux/amd64", Platform{OS: "linux", Architecture: "amd64"}, true},
+		{"linux/arm64/v8", Platform{OS: "linux", Architecture: "arm64", Variant: "v8"}, true},
+		{"linux", Platform{}, false},
+		{"linux/", Platform{}, false},
+		{"/amd64", Platform{}, false},
+		{"linux/arm64/v8/extra", Platform{}, false},
+		{"", Platform{}, false},
+	}
+	for _, c := range cases {
+		got, err := ParsePlatform(c.in)
+		if (err == nil) != c.ok || got != c.want {
+			t.Errorf("ParsePlatform(%q) = %+v, %v; want %+v, ok=%v", c.in, got, err, c.want, c.ok)
+		}
+		if c.ok && got.String() != c.in {
+			t.Errorf("String() = %q, want %q", got.String(), c.in)
+		}
+	}
+}
+
+func TestPlatformMatches(t *testing.T) {
+	arm := Platform{OS: "linux", Architecture: "arm64", Variant: "v8"}
+	if !(Platform{OS: "linux", Architecture: "arm64"}).Matches(arm) {
+		t.Error("a request without a variant must match any variant")
+	}
+	if !arm.Matches(arm) || (Platform{OS: "linux", Architecture: "arm64", Variant: "v7"}).Matches(arm) {
+		t.Error("a request with a variant must match that variant only")
+	}
+	if (Platform{OS: "windows", Architecture: "arm64"}).Matches(arm) || (Platform{OS: "linux", Architecture: "amd64"}).Matches(arm) {
+		t.Error("os and architecture must match")
+	}
+}
+
+func TestParseManifestKeepsPlatform(t *testing.T) {
+	m := mustParse(t, ociIndexBody)
+	if len(m.Manifests) != 2 || m.Manifests[0].Platform == nil || m.Manifests[1].Platform == nil {
+		t.Fatalf("platforms not kept: %+v", m.Manifests)
+	}
+	if got := m.Manifests[0].Platform.String(); got != "linux/ppc64le" {
+		t.Fatalf("first child platform = %q", got)
+	}
+	if mustParse(t, untypedIndexBody).Manifests[0].Platform != nil {
+		t.Fatal("a child without a platform must have a nil Platform")
+	}
+}
