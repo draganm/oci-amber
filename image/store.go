@@ -15,6 +15,7 @@ import (
 	"github.com/draganm/oci-amber/blob"
 	"github.com/draganm/oci-amber/keyedmutex"
 	"github.com/draganm/oci-amber/oci"
+	"github.com/draganm/oci-amber/rootfs"
 	"github.com/draganm/oci-amber/store"
 	"github.com/jobs-build/amber-store-core/key"
 )
@@ -56,6 +57,14 @@ func (im *Image) Root() key.Key { return im.root }
 // Rootfs returns the key of the image's rootfs/ directory, when Meta.Rootfs
 // says one is present.
 func (im *Image) Rootfs() (key.Key, bool) { return im.rootfs, im.hasRootfs }
+
+// FS returns a reader over the image's rootfs/ tree, when it has one.
+func (im *Image) FS() (*rootfs.FS, bool) {
+	if !im.hasRootfs {
+		return nil, false
+	}
+	return rootfs.NewFS(im.st, im.rootfs), true
+}
 
 // WriteTo streams the stored manifest bytes to w while hashing them, and
 // returns ErrDigestMismatch if they do not hash to Meta.Digest. The bytes

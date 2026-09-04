@@ -127,6 +127,21 @@ func TestPutRootfsOK(t *testing.T) {
 	if !ok {
 		t.Fatal("Open lost the rootfs")
 	}
+	fsys, ok := im.FS()
+	if !ok {
+		t.Fatal("FS() reports no rootfs")
+	}
+	listed, _, err := fsys.List("", "", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, e := range listed {
+		names = append(names, e.Name)
+	}
+	if !slices.Equal(names, []string{"bin", "etc", "lnk"}) {
+		t.Fatalf("FS root listing = %v", names)
+	}
 	want := map[string]uint64{"bin": store.TypeDir, "bin/app": store.TypeReg, "etc": store.TypeDir, "etc/new": store.TypeReg, "lnk": store.TypeLink}
 	got := e.walk(rk)
 	if len(got) != len(want) {
@@ -190,6 +205,9 @@ func TestPutRootfsUnavailable(t *testing.T) {
 	}
 	if _, ok := im.Rootfs(); ok {
 		t.Fatal("an unavailable rootfs has a key")
+	}
+	if _, ok := im.FS(); ok {
+		t.Fatal("an unavailable rootfs has an FS")
 	}
 	root := e.resolve(ManifestRef("library/app", m.Digest))
 	if _, err := e.st.Lookup(root, RootfsDir); !errors.Is(err, store.ErrNotFound) {
