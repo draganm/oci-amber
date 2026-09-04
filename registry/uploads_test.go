@@ -260,17 +260,22 @@ func TestUploadMonolithicPostSkipsKnownDigest(t *testing.T) {
 
 // A PUT whose digest is already stored is answered before its body is
 // read, and the session it completes is dropped together with whatever was
-// PATCHed into it.
+// PATCHed into it: more than the in-memory limit here, so the session had
+// spilled to disk and its file has to go.
 func TestUploadPutSkipsKnownDigest(t *testing.T) {
 	e := newTestEnv(t)
 	data := rawFixture()
 	d := e.putBlob(t, data)
-	garbage := randomBytes(13, 300<<10)
+	spilled := 1<<20 + 100
+	garbage := randomBytes(13, spilled+300<<10)
 	loc, _ := e.startUpload(t, repo)
 
-	resp := e.do(t, http.MethodPatch, loc, garbage[:100], nil)
+	resp := e.do(t, http.MethodPatch, loc, garbage[:spilled], nil)
 	assertStatus(t, resp, http.StatusAccepted)
-	resp = e.do(t, http.MethodPut, loc+"?digest="+d.String(), garbage[100:], nil)
+	if entries, err := os.ReadDir(e.uploadDir); err != nil || len(entries) != 1 {
+		t.Fatalf("session must have spilled to %s: %v, %v", e.uploadDir, entries, err)
+	}
+	resp = e.do(t, http.MethodPut, loc+"?digest="+d.String(), garbage[spilled:], nil)
 	assertStatus(t, resp, http.StatusCreated)
 	assertHeader(t, resp, "Location", "/v2/"+repo+"/blobs/"+d.String())
 	assertHeader(t, resp, "Docker-Content-Digest", d.String())
