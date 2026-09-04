@@ -2,6 +2,7 @@ package blob
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -133,12 +134,13 @@ func (b *Store) analyze(ctx context.Context, sp *upload.Spool) (decision, error)
 }
 
 // startsWithCompressedTarHeader reports whether the first 512 decompressed
-// bytes of r are a tar header block. It rewinds r and reads through a
-// klauspost decompressor for f, which pulls only as much of the compressed
-// stream as that one block needs; nothing is written to disk. Analyze
-// rewinds r itself (its Detect does), so the position left behind does not
-// matter. A stream with fewer than 512 decompressed bytes is not a tar; any
-// other failure returns an error and decides nothing.
+// bytes of r are a tar header block or the stream is an empty archive (see
+// probeTar). It rewinds r and reads through a klauspost decompressor for f,
+// which pulls only as much of the compressed stream as the probe needs;
+// nothing is written to disk. Analyze rewinds r itself (its Detect does),
+// so the position left behind does not matter. A stream with fewer than 512
+// decompressed bytes is not a tar; any other failure returns an error and
+// decides nothing.
 func startsWithCompressedTarHeader(r io.ReadSeeker, f zrecipe.Format) (bool, error) {
 	if _, err := r.Seek(0, io.SeekStart); err != nil {
 		return false, err
@@ -148,14 +150,7 @@ func startsWithCompressedTarHeader(r io.ReadSeeker, f zrecipe.Format) (bool, err
 		return false, err
 	}
 	defer dec.Close()
-	var hdr [tarHeaderSize]byte
-	if _, err := io.ReadFull(dec, hdr[:]); err != nil {
-		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
-			return false, nil
-		}
-		return false, err
-	}
-	return isTarHeader(hdr[:]), nil
+	return probeTar(dec)
 }
 
 // zstdWindowSize parses the zstd frame header of r and returns its declared
@@ -174,11 +169,24 @@ func zstdWindowSize(r io.ReadSeeker) (uint64, error) {
 }
 
 // startsWithTarHeader reports whether r begins with a tar header block
-// carrying a valid checksum.
+// carrying a valid checksum or is an empty archive (see probeTar).
 func startsWithTarHeader(r io.ReadSeeker) (bool, error) {
 	if _, err := r.Seek(0, io.SeekStart); err != nil {
 		return false, err
 	}
+	return probeTar(r)
+}
+
+// emptyArchiveMax is the longest all-zero stream accepted as an empty tar
+// archive: two zero blocks end an archive and GNU tar pads to its 10 KiB
+// record size.
+const emptyArchiveMax = 10240
+
+// probeTar reports whether r starts like a tar archive: a header block with
+// a valid checksum, or an empty archive, which is nothing but zero blocks
+// and at most emptyArchiveMax bytes long. A stream shorter than one block
+// is not a tar; a read error decides nothing.
+func probeTar(r io.Reader) (bool, error) {
 	var hdr [tarHeaderSize]byte
 	if _, err := io.ReadFull(r, hdr[:]); err != nil {
 		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
@@ -186,7 +194,25 @@ func startsWithTarHeader(r io.ReadSeeker) (bool, error) {
 		}
 		return false, err
 	}
-	return isTarHeader(hdr[:]), nil
+	if isTarHeader(hdr[:]) {
+		return true, nil
+	}
+	if !bytes.Equal(hdr[:], make([]byte, tarHeaderSize)) {
+		return false, nil
+	}
+	rest, err := io.ReadAll(io.LimitReader(r, emptyArchiveMax-tarHeaderSize+1))
+	if err != nil {
+		return false, err
+	}
+	if len(rest) > emptyArchiveMax-tarHeaderSize {
+		return false, nil
+	}
+	for _, c := range rest {
+		if c != 0 {
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
 // isTarHeader verifies the checksum of a 512-byte tar header: the sum of

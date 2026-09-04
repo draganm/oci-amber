@@ -1,11 +1,15 @@
 package blob
 
 import (
+	"archive/tar"
+	"bytes"
+	"compress/gzip"
 	"context"
 	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -218,5 +222,45 @@ func TestBuildRootAndOpen(t *testing.T) {
 		if names[i] != want[i] {
 			t.Fatalf("root entries = %v, want %v", names, want)
 		}
+	}
+}
+
+func TestPutEmptyArchive(t *testing.T) {
+	b, _, logs := newTestStore(t, Options{VerifyRoundTrip: true})
+	ctx := context.Background()
+	var buf bytes.Buffer
+	if err := tar.NewWriter(&buf).Close(); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct {
+		name, format string
+		data         []byte
+	}{
+		{"plain", "none", buf.Bytes()},
+		{"gzip", "gzip", gzipBytes(t, buf.Bytes(), gzip.DefaultCompression)},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			meta, err := b.Put(ctx, spoolOf(c.data))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if meta.Kind != KindPrism || meta.Entries != 0 || meta.Format != c.format {
+				t.Fatalf("meta = kind %s entries %d format %s, want prism/0/%s", meta.Kind, meta.Entries, meta.Format, c.format)
+			}
+			bl, err := b.Open(meta.Digest)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var out bytes.Buffer
+			if err := bl.WriteTo(ctx, &out); err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(out.Bytes(), c.data) {
+				t.Fatal("pulled bytes differ")
+			}
+			if !strings.Contains(logs.String(), "kind=prism") {
+				t.Fatalf("log:\n%s", logs.String())
+			}
+		})
 	}
 }
