@@ -1,6 +1,6 @@
 // Package blob stores one OCI blob per amber reference. A blob root is a
 // directory object holding meta.json plus either the verbatim bytes ("raw")
-// or the comp-prysm/tar-prism decomposition ("prism").
+// or the zrecipe/tar-prism decomposition ("prism").
 package blob
 
 import (
@@ -17,7 +17,7 @@ import (
 type Kind string
 
 const (
-	// KindPrism: the blob was taken apart with comp-prysm and tar-prism. The
+	// KindPrism: the blob was taken apart with zrecipe and tar-prism. The
 	// root holds comp.json, recipe.bin, recipe.json and blobs/.
 	KindPrism Kind = "prism"
 	// KindRaw: the root holds the uploaded bytes verbatim under "raw".
@@ -65,7 +65,7 @@ const (
 	CompFile = "comp.json"
 	RawFile  = "raw"
 
-	// spoolDirName is comp-prysm's temp directory under Options.WorkDir; New
+	// spoolDirName is zrecipe's temp directory under Options.WorkDir; New
 	// empties it at startup.
 	spoolDirName = "spool"
 )
@@ -74,7 +74,7 @@ const (
 func RefName(d oci.Digest) string { return "oci/blob/" + d.String() }
 
 // encodeMeta renders m as indented JSON with a trailing newline, the shape
-// comp-prysm's Params.Write and tar-prism's index file use.
+// zrecipe's Params.Write and tar-prism's index file use.
 func encodeMeta(m Meta) ([]byte, error) {
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)

@@ -7,24 +7,24 @@ crane, oras and buildkit push and pull against it without any client-side
 configuration beyond the registry URL.
 
 Instead of keeping each layer as an opaque compressed blob, oci-amber takes
-layers apart on push: [comp-prysm](https://github.com/draganm/comp-prysm)
+layers apart on push: [zrecipe](https://github.com/draganm/zrecipe)
 turns the compressed stream into the uncompressed tar plus a compression
 recipe, [tar-prism](https://github.com/draganm/tar-prism) turns the tar into
 per-file contents plus a tar recipe, and the file contents land in amber's
 content-defined-chunked store where they deduplicate across layers and
 images. Pulls rebuild the original bytes on the fly (tar-prism compose,
-comp-prysm recompress) and every served blob is byte-identical to what was
+zrecipe recompress) and every served blob is byte-identical to what was
 pushed; the sha256 is verified on the way out and a mismatch cuts the
 connection rather than serving wrong bytes.
 
 Layers whose compression cannot be reproduced exactly (a compressor
-comp-prysm does not know, a corrupt stream, a blob that is not a tar) are
+zrecipe does not know, a corrupt stream, a blob that is not a tar) are
 stored verbatim and served with range support.
 
 ## Requirements
 
 Everything is provided by the Nix flake: Go 1.26, `pkg-config`, `zlib` and
-`zstd` (comp-prysm's cgo engines), `gzip` and `pigz` (fixtures), and `crane`
+`zstd` (zrecipe's cgo engines), `gzip` and `pigz` (fixtures), and `crane`
 (client smoke test).
 
 ```sh
@@ -67,10 +67,10 @@ variable in the last column; a flag on the command line wins.
 | Flag | Default | Meaning | Environment |
 |---|---|---|---|
 | `--store` | required | store directory (created on first start) | `OCI_AMBER_STORE` |
-| `--work-dir` | `<store>/work` | parent of `<work-dir>/oci-amber/`, where spilled uploads and the comp-prysm spool live; at startup the *contents* of `<work-dir>/oci-amber/uploads` and `<work-dir>/oci-amber/spool` are deleted and nothing else under `--work-dir` is touched | `OCI_AMBER_WORK_DIR` |
+| `--work-dir` | `<store>/work` | parent of `<work-dir>/oci-amber/`, where spilled uploads and the zrecipe spool live; at startup the *contents* of `<work-dir>/oci-amber/uploads` and `<work-dir>/oci-amber/spool` are deleted and nothing else under `--work-dir` is touched | `OCI_AMBER_WORK_DIR` |
 | `--listen` | `:5000` | listen address | `OCI_AMBER_LISTEN` |
-| `--max-in-memory` | `64MiB` | upload spool and comp-prysm spool threshold before spilling to `--work-dir`; units `B`, `KiB`, `MiB`, `GiB`, `KB`, `MB`, `GB` | `OCI_AMBER_MAX_IN_MEMORY` |
-| `--analyze-parallelism` | `2` | comp-prysm candidate workers per blob (each holds one engine working set) | `OCI_AMBER_ANALYZE_PARALLELISM` |
+| `--max-in-memory` | `64MiB` | upload spool and zrecipe spool threshold before spilling to `--work-dir`; units `B`, `KiB`, `MiB`, `GiB`, `KB`, `MB`, `GB` | `OCI_AMBER_MAX_IN_MEMORY` |
+| `--analyze-parallelism` | `2` | zrecipe candidate workers per blob (each holds one engine working set) | `OCI_AMBER_ANALYZE_PARALLELISM` |
 | `--analyze-timeout` | `15m` | per-blob analyze deadline; on expiry the blob is stored raw | `OCI_AMBER_ANALYZE_TIMEOUT` |
 | `--max-concurrent-finalize` | `NumCPU/2` (min 1) | concurrent blob finalizations | `OCI_AMBER_MAX_CONCURRENT_FINALIZE` |
 | `--verify-roundtrip` | `true` | run the full pull pipeline over every prism before publishing it; a mismatch downgrades the blob to raw | `OCI_AMBER_VERIFY_ROUNDTRIP` |
@@ -86,7 +86,7 @@ variable in the last column; a flag on the command line wins.
 <store>/refs                    amber references
 <store>/gc                      amber collector state
 <store>/work/oci-amber/uploads  upload sessions that outgrew --max-in-memory
-<store>/work/oci-amber/spool    comp-prysm temporary files
+<store>/work/oci-amber/spool    zrecipe temporary files
 ```
 
 `oci-amber.json` pins the content-defined chunking (min 32 KiB, normal
@@ -105,7 +105,7 @@ oci/referrer/<repo>/<subject digest>/<referrer digest>  referrer's image root
 ```
 
 A blob root is a tar-prism prism directory (`recipe.bin`, `recipe.json`,
-`blobs/00000001…`) plus `comp.json` (comp-prysm parameters) and `meta.json`;
+`blobs/00000001…`) plus `comp.json` (zrecipe parameters) and `meta.json`;
 raw blobs hold the verbatim bytes in `raw` instead. An image root holds the
 exact manifest bytes in `manifest`, `meta.json`, and `blobs/` (and
 `manifests/` for an index) whose entries point at the referenced roots, so an
@@ -194,14 +194,13 @@ removes one.
 - Upload sessions do not survive a restart; clients restart the blob on
   `BLOB_UPLOAD_UNKNOWN`.
 - Only `sha256` digests.
-- A layer gzipped at best-speed over content that barely compresses (the
-  shape `crane append` and `go-containerregistry`'s tarball writer produce)
-  currently falls back to raw with `raw_reason=roundtrip-failed`: bytes are
-  never lost (the round-trip check catches it before publishing), but the
-  layer keeps its original compressed size on disk instead of decomposing.
-  The cause is a comp-prysm zlib level-0 bug, not oci-amber, tar-prism or the
-  store — see the comp-prysm issue (`docs/comp-prysm-zlib-level0-roundtrip.md` has the
-  reproduction).
+- A layer that zrecipe accepts but cannot rebuild is stored raw with
+  `raw_reason=roundtrip-failed`; bytes are never lost because the round-trip
+  check runs before publishing. zrecipe v0.1.0 did this for layers gzipped at
+  best-speed over content that barely compresses (the shape `crane append`
+  produces); v0.2.0 fixed it and the crane smoke test now asserts such a
+  layer becomes a prism. `docs/zrecipe-zlib-level0-roundtrip.md` records the
+  investigation.
 
 ## Development
 
@@ -225,4 +224,4 @@ The design document lives in `docs/superpowers/specs/2026-09-03-oci-amber-design
 
 ## License
 
-AGPL-3.0-or-later, like amber-store-core, comp-prysm and tar-prism.
+AGPL-3.0-or-later, like amber-store-core, zrecipe and tar-prism.

@@ -153,11 +153,12 @@ func TestCraneSmoke(t *testing.T) {
 	if m := metas[configDigest]; m.Kind != blob.KindRaw || m.RawReason != blob.ReasonNotTar {
 		t.Fatalf("config stored as kind=%s reason=%q, want raw/not-tar", m.Kind, m.RawReason)
 	}
-	// crane compresses with Go's gzip too, so this is normally a prism as
-	// well; a raw fallback is legal (the bytes were verified above) and is
-	// only reported.
-	if m := metas[appendedLayer]; m.Kind != blob.KindPrism {
-		t.Logf("note: crane-compressed layer %s stored raw (%s)", appendedLayer, m.RawReason)
+	// crane compresses with Go's gzip at best speed over incompressible
+	// data. zrecipe v0.1.0 (then named comp-prysm) accepted such streams
+	// with parameters it could not reproduce, so this layer used to fall
+	// back to raw; v0.2.0 fixed that and the layer must be a prism now.
+	if m := metas[appendedLayer]; m.Kind != blob.KindPrism || m.Format != "gzip" {
+		t.Fatalf("crane-compressed layer %s stored as kind=%s format=%s reason=%q, want prism/gzip", appendedLayer, m.Kind, m.Format, m.RawReason)
 	}
 }
 

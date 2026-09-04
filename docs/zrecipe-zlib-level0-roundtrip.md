@@ -1,5 +1,7 @@
 # Why crane-built best-speed layers are stored raw: a comp-prysm zlib level-0 feeding bug
 
+comp-prysm was renamed to zrecipe and v0.2.0 fixed this bug (https://github.com/draganm/comp-prysm/issues/1); oci-amber pins v0.2.0 and the crane smoke test now asserts the layer is a prism. The text below is the original record and keeps the old name.
+
 Investigation record (2026-09-04) of a push-time round-trip failure seen in the crane smoke test. The defect is in comp-prysm, not oci-amber; the registry stores such layers raw with `rawReason=roundtrip-failed` until comp-prysm is fixed as proposed below.
 
 

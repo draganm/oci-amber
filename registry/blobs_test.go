@@ -34,7 +34,7 @@ func randomBytes(seed uint64, n int) []byte {
 	return b
 }
 
-// rawFixture is a blob comp-prysm classifies as raw: a JSON config, format
+// rawFixture is a blob zrecipe classifies as raw: a JSON config, format
 // none and not a tar.
 func rawFixture() []byte {
 	return []byte(`{"architecture":"amd64","os":"linux","config":{"Env":["PATH=/usr/bin"]},"rootfs":{"type":"layers","diff_ids":[]}}`)
@@ -48,7 +48,7 @@ func largeRawFixture() []byte {
 }
 
 // gzipTarFixture is a gzip layer as Go's compress/gzip writes it, which
-// comp-prysm reproduces with its go-flate engine, so it is stored as a prism.
+// zrecipe reproduces with its go-flate engine, so it is stored as a prism.
 func gzipTarFixture(t *testing.T) []byte {
 	t.Helper()
 	var tarBuf bytes.Buffer

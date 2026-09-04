@@ -11,8 +11,8 @@ import (
 	"strings"
 	"sync"
 
-	compprysm "github.com/draganm/comp-prysm"
 	tarprism "github.com/draganm/tar-prism"
+	zrecipe "github.com/draganm/zrecipe"
 	"github.com/jobs-build/amber-store-core/key"
 	kpgzip "github.com/klauspost/compress/gzip"
 	"github.com/klauspost/compress/zstd"
@@ -93,28 +93,28 @@ func (c *byteCounter) Read(p []byte) (int, error) {
 
 // newDecompressor returns a reader over the decompressed form of r for the
 // format pass one detected: klauspost gzip, klauspost zstd bounded like
-// comp-prysm's own first pass, or r itself for "none". Closing it does not
+// zrecipe's own first pass, or r itself for "none". Closing it does not
 // close r.
 //
 // The zstd decoder's max window matches maxZstdWindow (analyze.go): analyze
 // already turns away any frame that declares a bigger window before this is
 // ever called, so the bound here is a second, independent guard against
 // this decoder ever growing a window buffer past what the store accepts.
-func newDecompressor(format compprysm.Format, r io.Reader) (io.ReadCloser, error) {
+func newDecompressor(format zrecipe.Format, r io.Reader) (io.ReadCloser, error) {
 	switch format {
-	case compprysm.FormatGzip:
+	case zrecipe.FormatGzip:
 		zr, err := kpgzip.NewReader(r)
 		if err != nil {
 			return nil, err
 		}
 		return zr, nil
-	case compprysm.FormatZstd:
+	case zrecipe.FormatZstd:
 		dec, err := zstd.NewReader(r, zstd.WithDecoderConcurrency(1), zstd.WithDecoderMaxWindow(maxZstdWindow))
 		if err != nil {
 			return nil, err
 		}
 		return dec.IOReadCloser(), nil
-	case compprysm.FormatNone:
+	case zrecipe.FormatNone:
 		return io.NopCloser(r), nil
 	default:
 		return nil, fmt.Errorf("blob: unknown format %q", format)
@@ -267,7 +267,7 @@ func (rw *recipeWriter) Close() error {
 // apart into the store and write comp.json. It returns a *decomposeError
 // when the blob should fall back to raw and any other error when the upload
 // must fail.
-func (b *Store) ingestPrism(ctx context.Context, w *store.Writer, sp *upload.Spool, params *compprysm.Params) (prismResult, error) {
+func (b *Store) ingestPrism(ctx context.Context, w *store.Writer, sp *upload.Spool, params *zrecipe.Params) (prismResult, error) {
 	src, err := sp.Open()
 	if err != nil {
 		return prismResult{}, fmt.Errorf("blob: opening spool: %w", err)
@@ -349,7 +349,7 @@ func classifyDecomposeError(ctx context.Context, err error) error {
 // (decompose-failed, roundtrip-failed; both logged at error level), the
 // context's error when the request went away, and any other error when the
 // upload must fail. Objects written before a failure are left to GC.
-func (b *Store) finalizePrism(ctx context.Context, sp *upload.Spool, params *compprysm.Params, d oci.Digest) (prismResult, store.Stats, error) {
+func (b *Store) finalizePrism(ctx context.Context, sp *upload.Spool, params *zrecipe.Params, d oci.Digest) (prismResult, store.Stats, error) {
 	w := b.st.NewWriter(ctx)
 	res, err := b.ingestPrism(ctx, w, sp, params)
 	if err != nil {
@@ -391,7 +391,7 @@ func (b *Store) finalizePrism(ctx context.Context, sp *upload.Spool, params *com
 // roundTripCheck runs the pull pipeline over freshly ingested prism objects
 // into a sha256 and compares the result with the OCI digest. It is a
 // variable so tests can force a failure or count calls.
-var roundTripCheck = func(ctx context.Context, b *Store, src *amberSource, params *compprysm.Params, want oci.Digest) error {
+var roundTripCheck = func(ctx context.Context, b *Store, src *amberSource, params *zrecipe.Params, want oci.Digest) error {
 	h := sha256.New()
 	if err := composeRecompress(ctx, h, src, params); err != nil {
 		return err
@@ -456,7 +456,7 @@ func (b *Store) openSource(root key.Key) (*amberSource, error) {
 }
 
 // readParams reads comp.json of a prism root.
-func (b *Store) readParams(root key.Key) (*compprysm.Params, error) {
+func (b *Store) readParams(root key.Key) (*zrecipe.Params, error) {
 	k, err := b.st.LookupKey(root, CompFile)
 	if err != nil {
 		return nil, fmt.Errorf("blob: %s: %w", CompFile, err)
@@ -469,24 +469,24 @@ func (b *Store) readParams(root key.Key) (*compprysm.Params, error) {
 // res.comp, not yet under a root) so the round-trip check exercises exactly
 // the bytes a real pull will read instead of the in-memory params pass one
 // produced.
-func (b *Store) readCompParams(k key.Key) (*compprysm.Params, error) {
+func (b *Store) readCompParams(k key.Key) (*zrecipe.Params, error) {
 	data, err := b.st.ReadFile(k)
 	if err != nil {
 		return nil, fmt.Errorf("blob: reading %s: %w", CompFile, err)
 	}
-	params, err := compprysm.ReadParams(bytes.NewReader(data))
+	params, err := zrecipe.ReadParams(bytes.NewReader(data))
 	if err != nil {
 		return nil, fmt.Errorf("blob: %s: %w", CompFile, err)
 	}
 	return params, nil
 }
 
-// composeRecompress streams the prism through tar-prism and comp-prysm into
+// composeRecompress streams the prism through tar-prism and zrecipe into
 // w: ComposeFrom runs on a goroutine feeding a pipe that Recompress reads.
 // Nothing touches the disk. Once ctx is done the pipe is closed at once, so
 // a client that went away does not make Recompress compose and drain the
 // whole layer for its digest check; the context's error is then reported.
-func composeRecompress(ctx context.Context, w io.Writer, src *amberSource, params *compprysm.Params) error {
+func composeRecompress(ctx context.Context, w io.Writer, src *amberSource, params *zrecipe.Params) error {
 	pr, pw := io.Pipe()
 	composed := make(chan error, 1)
 	go func() {
@@ -502,7 +502,7 @@ func composeRecompress(ctx context.Context, w io.Writer, src *amberSource, param
 		case <-stop:
 		}
 	}()
-	rerr := compprysm.Recompress(ctx, params, pr, w, &compprysm.RecompressOptions{AllowVersionMismatch: true})
+	rerr := zrecipe.Recompress(ctx, params, pr, w, &zrecipe.RecompressOptions{AllowVersionMismatch: true})
 	close(stop)
 	// Unblock the composer if Recompress stopped early, then collect it.
 	pr.Close()
@@ -525,7 +525,7 @@ func composeRecompress(ctx context.Context, w io.Writer, src *amberSource, param
 }
 
 // writePrism rebuilds the original blob bytes of a prism root into w.
-func (b *Store) writePrism(ctx context.Context, w io.Writer, root key.Key, params *compprysm.Params) error {
+func (b *Store) writePrism(ctx context.Context, w io.Writer, root key.Key, params *zrecipe.Params) error {
 	src, err := b.openSource(root)
 	if err != nil {
 		return err

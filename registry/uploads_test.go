@@ -37,7 +37,7 @@ func (e *testEnv) startUpload(t *testing.T, name string) (location, id string) {
 	return location, id
 }
 
-// assertNoWorkFiles checks that no spilled upload or comp-prysm spool file
+// assertNoWorkFiles checks that no spilled upload or zrecipe spool file
 // is left under the work directory.
 func assertNoWorkFiles(t *testing.T, e *testEnv) {
 	t.Helper()
