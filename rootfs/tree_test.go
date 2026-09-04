@@ -23,8 +23,10 @@ func fakeKey(t *testing.T, s string) key.Key {
 func fileEntry(t *testing.T, p string) entry {
 	return entry{kind: kindFile, path: p, mode: 0o644, uid: 1, mtime: 10, content: fakeKey(t, p)}
 }
-func dirEntry(p string) entry           { return entry{kind: kindDir, path: p, mode: 0o750, uid: 2, mtime: 20} }
-func symlinkEntry(p, target string) entry { return entry{kind: kindSymlink, path: p, mode: 0o777, target: target} }
+func dirEntry(p string) entry { return entry{kind: kindDir, path: p, mode: 0o750, uid: 2, mtime: 20} }
+func symlinkEntry(p, target string) entry {
+	return entry{kind: kindSymlink, path: p, mode: 0o777, target: target}
+}
 func hardlinkEntry(p, target string) entry {
 	return entry{kind: kindHardlink, path: p, mode: 0o600, uid: 3, mtime: 30, target: target}
 }

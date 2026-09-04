@@ -118,7 +118,7 @@ type memSink struct {
 }
 
 func (s *memSink) Recipe() (io.WriteCloser, error) { return s, nil }
-func (s *memSink) Write(p []byte) (int, error)    { return s.buf.Write(p) }
+func (s *memSink) Write(p []byte) (int, error)     { return s.buf.Write(p) }
 func (s *memSink) Close() error {
 	if s.l.recipe != (key.Key{}) {
 		return nil

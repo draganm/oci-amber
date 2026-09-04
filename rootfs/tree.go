@@ -18,9 +18,9 @@ type node struct {
 	mode     uint64 // type bits and permissions
 	uid, gid uint64
 	mtime    int64
-	content  key.Key          // TypeReg
-	link     string           // TypeLink
-	rdev     [2]uint64        // TypeChar, TypeBlock
+	content  key.Key   // TypeReg
+	link     string    // TypeLink
+	rdev     [2]uint64 // TypeChar, TypeBlock
 	xattrs   map[string][]byte
 	children map[string]*node // TypeDir
 	implicit bool             // a directory created for a child, no header seen
