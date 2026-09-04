@@ -404,3 +404,18 @@ merged in, checked through the image store; the manifest's meta reports
   tar).
 - Serve `rootfs/` metadata for the root directory itself (amber roots carry
   none).
+
+## Deviations
+
+Recorded while implementing (2026-09-04):
+
+- `meta.json`'s `rootfs.entries` is always present, 0 unless the status is
+  `ok` or `partial`, rather than omitted. The other fields follow the
+  section above.
+- A one-byte regular file has its byte read from the store while parsing:
+  `archive/tar` reads the last byte of every file after seeking, and for a
+  one-byte file that byte is at the region's start, where real content is
+  served. Every longer file is passed over without a read.
+- Test fixtures confirmed that `archive/tar` treats a hard link's size field
+  as zero, exactly as "Known limits" says; the rootfs and image tests craft
+  such an archive to prove the `unavailable` path.

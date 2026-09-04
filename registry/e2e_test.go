@@ -16,10 +16,14 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/jobs-build/amber-store-core/fstree"
+	"github.com/jobs-build/amber-store-core/key"
 
 	"github.com/draganm/oci-amber/blob"
 	"github.com/draganm/oci-amber/image"
@@ -56,7 +60,7 @@ const e2eMaxInMemory = 1 << 20
 // are header-only.
 const (
 	e2eEntriesA = 6 // bin/app, etc/config.yaml, lib/libfoo.so, share/readme.txt, the PAX-named NOTICE, var/empty
-	e2eEntriesB = 3 // etc/hostname, etc/hosts, etc/os-release
+	e2eEntriesB = 4 // etc/hostname, etc/hosts, etc/os-release, .wh.var (a zero-length regular file)
 	e2eEntriesC = 3 // bin/app, etc/extra.conf, lib/libfoo.so
 )
 
@@ -79,6 +83,7 @@ const (
 func TestE2EPushPull(t *testing.T) {
 	e := newE2EEnv(t)
 	e.push()
+	e.checkRootfs()
 	e.checkLogs()
 	e.storage()
 	e.pull()
@@ -133,6 +138,7 @@ type e2eEnv struct {
 	logs      *e2eLogBuffer
 	st        *store.Store
 	blobs     *blob.Store
+	images    *image.Store
 	tmp       string
 	work      string
 	uploadDir string
@@ -207,6 +213,7 @@ func newE2EEnv(t *testing.T) *e2eEnv {
 		logs:      logs,
 		st:        st,
 		blobs:     blobs,
+		images:    images,
 		tmp:       dir,
 		work:      work,
 		uploadDir: uploadDir,
@@ -395,6 +402,7 @@ func newE2EFixtures(t *testing.T) *e2eFixtures {
 		{name: "etc/hostname", data: []byte("e2e\n")},
 		{name: "etc/hosts", data: []byte("127.0.0.1 localhost\n")},
 		{name: "etc/os-release", data: []byte("ID=e2e\nVERSION_ID=1\n")},
+		{name: ".wh.var"}, // whiteout: removes layer A's var/ from the rootfs
 	})
 	fx.layerB = fx.tarB
 
@@ -1664,4 +1672,82 @@ func (e *e2eEnv) deletes() {
 	c.expectError(resp, body, http.StatusNotFound, oci.CodeManifestUnknown)
 	resp, body = c.do(http.MethodDelete, c.url("/v2/"+e2eApp+"/blobs/"+cfg2.String()), nil, nil)
 	c.expectError(resp, body, http.StatusNotFound, oci.CodeBlobUnknown)
+}
+
+// ---------------------------------------------------------------------------
+// Phase 1b: the stored rootfs
+
+// checkRootfs opens image 1 and walks its rootfs/: layer A with layer B's
+// files merged in and var/ whited out.
+func (e *e2eEnv) checkRootfs() {
+	t := e.t
+	im, err := e.images.Open(e2eApp, e.m1.String())
+	if err != nil {
+		t.Fatalf("Open image 1: %v", err)
+	}
+	if im.Meta.Rootfs == nil || im.Meta.Rootfs.Status != image.RootfsOK {
+		t.Fatalf("image 1 rootfs = %+v, want ok", im.Meta.Rootfs)
+	}
+	root, ok := im.Rootfs()
+	if !ok {
+		t.Fatal("image 1 has no rootfs key")
+	}
+	got := map[string]fstree.Entry{}
+	var walk func(prefix string, k key.Key)
+	walk = func(prefix string, k key.Key) {
+		entries, _, err := e.st.ListDir(k, "", 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, ent := range entries {
+			p := prefix + string(ent.Name)
+			got[p] = ent
+			if ent.Mode&store.TypeMask == store.TypeDir {
+				ck, err := key.Parse(ent.ContentKey)
+				if err != nil {
+					t.Fatal(err)
+				}
+				walk(p+"/", ck)
+			}
+		}
+	}
+	walk("", root)
+	longDir := "share/doc/" + strings.TrimSuffix(strings.Repeat("a-rather-long-directory-name/", 5), "/")
+	want := []string{"bin", "bin/app", "bin/app-link", "etc", "etc/config.yaml", "etc/hostname", "etc/hosts", "etc/os-release",
+		"lib", "lib/libfoo.so", "lib/libfoo.so.1", "share", "share/readme.txt", "share/doc"}
+	parts := strings.Split(longDir, "/")
+	for i := 3; i <= len(parts); i++ {
+		want = append(want, strings.Join(parts[:i], "/"))
+	}
+	want = append(want, longDir+"/NOTICE")
+	sort.Strings(want)
+	names := make([]string, 0, len(got))
+	for p := range got {
+		names = append(names, p)
+	}
+	sort.Strings(names)
+	if !slices.Equal(names, want) {
+		t.Fatalf("rootfs paths:\n got %v\nwant %v", names, want)
+	}
+	if im.Meta.Rootfs.Entries != len(want) {
+		t.Fatalf("rootfs entries = %d, want %d", im.Meta.Rootfs.Entries, len(want))
+	}
+	if e := got["bin/app-link"]; e.Mode&store.TypeMask != store.TypeLink || string(e.LinkTarget) != "app" {
+		t.Fatalf("bin/app-link = %+v", e)
+	}
+	if !bytes.Equal(got["lib/libfoo.so"].ContentKey, got["lib/libfoo.so.1"].ContentKey) {
+		t.Fatal("hard link does not share the target's content key")
+	}
+	app, err := key.Parse(got["bin/app"].ContentKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if app.Length() != uint64(len(e.fx.big)) {
+		t.Fatalf("bin/app is %d bytes, want %d", app.Length(), len(e.fx.big))
+	}
+	for _, rec := range e.logs.records(t, "image pushed") {
+		if rec["digest"] == e.m1.String() && rec["rootfs"] != "ok" {
+			t.Fatalf("image 1 push line: %v", rec)
+		}
+	}
 }

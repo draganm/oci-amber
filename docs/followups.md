@@ -120,3 +120,15 @@ Collected from the per-task and whole-branch reviews of the initial implementati
 
 - A gzipped empty tar (the 1024 zero-byte end-of-archive marker, e.g. an OCI empty layer) is now classified raw/not-tar because an all-zero first block fails the tar-header probe; harmless (round-trips, 32 bytes) and consistent with the format=none rule, but a behaviour change worth a test.
 - Sweep counts a session whose close failed; blob.New no longer removes a stale non-directory at <WorkDir>/spool (unreachable under the ownership rule).
+
+### rootfs view (2026-09-04)
+
+Deferred from `docs/superpowers/specs/2026-09-04-rootfs-view-design.md`:
+
+- Move blob resolution and the rootfs build before the repository lock so concurrent pushes to one repository do not serialize on it.
+- A view for raw tar layers, storing their contents a second time.
+- Backfill command for existing stores (images already stored get a rootfs only when pushed again).
+- HTTP endpoints over `rootfs/`: browse, fetch a file or a subtree as a tar.
+- Metadata for the rootfs root directory itself (amber roots carry none).
+- PAX sparse 1.0 maps are served for real from the content region so the layer parses; the entry is still skipped. Representing sparse files would need the holes expanded into the CAS.
+- `image.Meta.Rootfs.Entries` is always present (0 without a tree) rather than omitted, so an empty rootfs is distinguishable from an absent field in JSON without a pointer.

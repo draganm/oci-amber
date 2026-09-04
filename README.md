@@ -21,6 +21,13 @@ Layers whose compression cannot be reproduced exactly (a compressor
 zrecipe does not know, a corrupt stream, a blob that is not a tar) are
 stored verbatim and served with range support.
 
+Every pushed container image also gets a root filesystem view: the layers
+applied in order with OCI whiteout semantics, stored in the image root as
+an amber directory tree whose regular files point at the content the layers
+already hold. Building it replays tar headers from the stored recipes and
+never reads file contents. It is the substrate for browsing an image and
+serving parts of it without rebuilding a layer.
+
 ## Requirements
 
 Everything is provided by the Nix flake: Go 1.26, `pkg-config`, `zlib` and
@@ -111,6 +118,23 @@ exact manifest bytes in `manifest`, `meta.json`, and `blobs/` (and
 `manifests/` for an index) whose entries point at the referenced roots, so an
 image is one reachable tree.
 
+The image root of a container image (an image manifest whose config is an
+OCI or Docker image config) also holds `rootfs/`, the root filesystem the
+layers produce: a plain amber directory tree with the tar's modes,
+ownership, mtimes, symlinks, hard links, device nodes, FIFOs and extended
+attributes, whose regular files point at the content the layers' prisms
+already store, so it adds directory objects only and amber's own tools can
+export or restore it. Its `meta.json` carries a `rootfs` object with
+`status` (`ok`, `partial`, `unavailable` or `not-applicable`) and `entries`;
+`partial` lists the first 100 skipped entries with their layer, path and
+reason plus `skippedCount`, `unavailable` gives the `reason`. A raw layer or
+one whose headers `archive/tar` rejects makes the rootfs unavailable; a
+sparse file, a path escaping the root, a hard link without a target or a
+type tar cannot place is skipped. The push succeeds either way. Indexes and
+artifacts have no rootfs; re-pushing a manifest reuses the one already
+stored under its digest, and the same image in two repositories shares
+every rootfs object.
+
 ## HTTP surface
 
 The full distribution API: blob HEAD/GET/DELETE with single-range requests
@@ -151,9 +175,10 @@ that reproduces the layer and `entries` counts its regular files) or `raw`
 (verbatim bytes; `raw_reason` is one of `not-reproducible`, `unsupported`,
 `corrupt`, `not-tar`, `analyze-timeout`, `roundtrip-failed`,
 `decompose-failed`). An uncompressed tar is a prism with `format=none` and an
-empty `engine`: there is no compressor whose output has to be reproduced. A
-prism line never carries `raw_reason`; a raw line never carries `engine` or
-`entries`. `logical_bytes` is the encoded size of every object offered to the
+empty `engine`: there is no compressor whose output has to be reproduced. An
+empty archive (nothing but zero blocks, the blob Docker uses as an empty
+layer) is a prism with `entries=0`. A prism line never carries
+`raw_reason`; a raw line never carries `engine` or `entries`. `logical_bytes` is the encoded size of every object offered to the
 store, `deduped_bytes` the part that already existed, and `disk_bytes` what
 was actually appended to pack segments; the blob root and its `meta.json` are
 not counted. A blob that is uploaded again is not re-ingested and counts as
@@ -166,7 +191,7 @@ After every manifest or index push, one line per image (an identical
 re-push logs again, with `disk_bytes=0` and `compression_ratio=+Inf`):
 
 ```
-time=2026-09-03T18:00:02.007+02:00 level=INFO msg="image pushed" repo=library/app reference=v1 digest=sha256:c81d… kind=manifest blobs=3 manifests=0 total_bytes=95631872 logical_bytes=327545651 deduped_bytes=293700000 deduped_percent=89.7 disk_bytes=10276044 compression_ratio=9.31 duration=18.6ms
+time=2026-09-03T18:00:02.007+02:00 level=INFO msg="image pushed" repo=library/app reference=v1 digest=sha256:c81d… kind=manifest blobs=3 manifests=0 rootfs=ok rootfs_entries=4213 total_bytes=95631872 logical_bytes=327545651 deduped_bytes=293700000 deduped_percent=89.7 disk_bytes=10276044 compression_ratio=9.31 duration=18.6ms
 time=2026-09-03T18:00:02.311+02:00 level=INFO msg="image pushed" repo=library/app reference=latest digest=sha256:e07a… kind=index blobs=0 manifests=2 total_bytes=191267209 logical_bytes=655091302 deduped_bytes=620841219 deduped_percent=94.8 disk_bytes=10280120 compression_ratio=18.61 duration=4.2ms
 ```
 
@@ -179,6 +204,15 @@ already present count as fully deduplicated) and the manifest's own objects.
 reached the disk) and `deduped_percent` is
 `100 * deduped_bytes / logical_bytes`. The same numbers are stored in the
 image's `meta.json`.
+
+A manifest line also carries `rootfs=<status>` and, when a tree was stored,
+`rootfs_entries=<n>`; an index line carries neither. A rootfs that is
+missing or incomplete logs one more line at Warn level:
+
+```
+time=2026-09-03T18:00:02.008+02:00 level=WARN msg="rootfs unavailable" repo=library/app digest=sha256:c81d… reason="layer sha256:9b2e… is stored raw (not-reproducible)"
+time=2026-09-03T18:00:02.008+02:00 level=WARN msg="rootfs partial" repo=library/app digest=sha256:c81d… skipped=1 path=usr/lib/big.img reason="sparse file"
+```
 
 Internal failures answer `500` with `{"errors":[]}` and log
 `msg="request failed"` at Error level with `method`, `path` and `error`; a
@@ -205,6 +239,11 @@ removes one.
 - Upload sessions do not survive a restart; clients restart the blob on
   `BLOB_UPLOAD_UNKNOWN`.
 - Only `sha256` digests.
+- The rootfs view is built for image manifests only and skips what a tar
+  cannot faithfully place: sparse files, paths escaping the root, hard links
+  without a target, unknown entry types. A raw layer or a hard link carrying
+  a payload (which `archive/tar` cannot parse) leaves the image without a
+  view. Nothing serves `rootfs/` over HTTP yet.
 - A layer that zrecipe accepts but cannot rebuild is stored raw with
   `raw_reason=roundtrip-failed`; bytes are never lost because the round-trip
   check runs before publishing. zrecipe v0.1.0 did this for layers gzipped at
