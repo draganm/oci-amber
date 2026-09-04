@@ -10,6 +10,7 @@ import (
 	"sync"
 
 	"github.com/jobs-build/amber-store-core/amberpack"
+	"github.com/jobs-build/amber-store-core/cborx"
 	"github.com/jobs-build/amber-store-core/chunkers"
 	"github.com/jobs-build/amber-store-core/fstree"
 	"github.com/jobs-build/amber-store-core/key"
@@ -319,4 +320,31 @@ func (w *Writer) Abort() {
 	w.cancel(errAborted)
 	w.closeStream()
 	<-w.done
+}
+
+// XattrInlineMax is the largest canonical encoding of an extended-attribute
+// set that is kept inline in a directory entry; a larger set is spilled to
+// an XattrSet object. It is amber's own ingest default.
+const XattrInlineMax = 256
+
+// PutXattrs prepares m for a directory entry: the canonical encoding is
+// returned as inline when it is at most XattrInlineMax bytes, otherwise an
+// XattrSet object is emitted and its key returned. An empty m yields
+// neither. Safe for concurrent use.
+func (w *Writer) PutXattrs(m map[string][]byte) (inline []byte, spilled key.Key, err error) {
+	if len(m) == 0 {
+		return nil, key.Key{}, nil
+	}
+	enc := cborx.EncodeXattrs(m)
+	if len(enc) <= XattrInlineMax {
+		return enc, key.Key{}, nil
+	}
+	obj, err := fstree.EncodeXattrSet(m)
+	if err != nil {
+		return nil, key.Key{}, err
+	}
+	if err := w.Emit(obj); err != nil {
+		return nil, key.Key{}, err
+	}
+	return nil, obj.Key, nil
 }
