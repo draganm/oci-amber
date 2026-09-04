@@ -67,12 +67,23 @@ type config struct {
 	LogLevel              slog.Level
 	LogOutput             io.Writer           // nil means os.Stderr
 	OnListen              func(addr net.Addr) // optional; called once the listener is bound
+	// Stop, when set, is called the moment ctx.Done fires, before the
+	// shutdown drain starts. main wires this to signal.NotifyContext's
+	// cancel/stop function, so it also stops relaying SIGINT/SIGTERM to ctx:
+	// a second signal during the (potentially long) drain then takes the
+	// default action and terminates the process, instead of being silently
+	// absorbed by a context that is already cancelled.
+	Stop func()
 }
 
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	if err := newApp(run).RunContext(ctx, os.Args); err != nil {
+	serve := func(ctx context.Context, cfg config) error {
+		cfg.Stop = stop
+		return run(ctx, cfg)
+	}
+	if err := newApp(serve).RunContext(ctx, os.Args); err != nil {
 		fmt.Fprintln(os.Stderr, "oci-amber:", err)
 		os.Exit(1)
 	}
@@ -274,6 +285,13 @@ func run(ctx context.Context, cfg config) error {
 		errs = append(errs, fmt.Errorf("serving on %s: %w", ln.Addr(), err))
 	case <-ctx.Done():
 		log.Info("shutting down", "reason", ctx.Err().Error(), "timeout", shutdownTimeout)
+		// Stop relaying signals now, at the start of the drain, not after it
+		// finishes: a second SIGINT/SIGTERM during a slow drain must be able
+		// to kill the process outright rather than being swallowed by a
+		// context that is already done.
+		if cfg.Stop != nil {
+			cfg.Stop()
+		}
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 		if err := srv.Shutdown(shutdownCtx); err != nil {
 			log.Warn("handlers still running after shutdown timeout; closing connections", "error", err)

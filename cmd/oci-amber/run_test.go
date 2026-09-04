@@ -167,6 +167,51 @@ func TestRunServesV2(t *testing.T) {
 	}
 }
 
+// TestRunCallsStopAtShutdownStart covers the second-SIGINT fix: run must
+// call cfg.Stop (main wires it to signal.NotifyContext's stop) the moment
+// ctx.Done fires, before the shutdown drain, not after run returns. A nil
+// Stop (every other test in this file) must remain a silent no-op.
+func TestRunCallsStopAtShutdownStart(t *testing.T) {
+	storeDir := filepath.Join(t.TempDir(), "store")
+	logs := &syncBuffer{}
+	cfg := testConfig(storeDir, logs)
+	addrCh := make(chan net.Addr, 1)
+	cfg.OnListen = func(a net.Addr) { addrCh <- a }
+	stopped := make(chan struct{})
+	cfg.Stop = func() { close(stopped) }
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- run(ctx, cfg) }()
+
+	select {
+	case <-addrCh:
+	case err := <-done:
+		t.Fatalf("run exited before listening: %v", err)
+	case <-time.After(30 * time.Second):
+		t.Fatal("timed out waiting for the server to listen")
+	}
+
+	cancel()
+	select {
+	case <-stopped:
+	case err := <-done:
+		t.Fatalf("run returned (%v) before calling Stop", err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("Stop was not called promptly after ctx.Done")
+	}
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("run returned %v after cancel, want nil", err)
+		}
+	case <-time.After(shutdownTimeout + 10*time.Second):
+		t.Fatal("run did not return after cancel")
+	}
+}
+
 func TestRunFailsWhenListenAddressIsBusy(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
