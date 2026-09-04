@@ -195,9 +195,13 @@ func convert(hdr *tar.Header, content key.Key) entry {
 		}
 		if base == opaqueWhiteout {
 			e.kind, e.path = kindOpaque, dir
-		} else {
-			e.kind, e.path = kindWhiteout, joinPath(dir, strings.TrimPrefix(base, whiteoutPrefix))
+			return e
 		}
+		name := strings.TrimPrefix(base, whiteoutPrefix)
+		if name == "" {
+			return e.skip("whiteout without a name")
+		}
+		e.kind, e.path = kindWhiteout, joinPath(dir, name)
 		return e
 	}
 	switch hdr.Typeflag {

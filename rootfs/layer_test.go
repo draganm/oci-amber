@@ -7,6 +7,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
+	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -294,6 +297,86 @@ func TestParseLayerSkipsGNUSparse(t *testing.T) {
 	}
 }
 
+func TestParseLayerSkipsGNUSparseWithExtension(t *testing.T) {
+	st := openStore(t)
+	compact := strings.Repeat("d", 1024)
+	archive := buildTar(t, tar.FormatGNU, tarEntry{name: "sparse", data: compact}, tarEntry{name: "after", data: "after\n"})
+	// The header says one more sparse extension block follows it; the
+	// block is empty. tar-prism keeps it in the recipe and archive/tar reads
+	// it from there, so the content region still starts where both expect.
+	archive = slices.Concat(archive[:512], make([]byte, 512), archive[512:])
+	patchHeader(archive, 0, func(blk []byte) {
+		blk[156] = tar.TypeGNUSparse
+		octal(blk[386:398], 0, 12)
+		octal(blk[398:410], 1024, 12)
+		blk[482] = 1
+		octal(blk[483:495], 4096, 12)
+	})
+	l := newMemLayer(t, st, archive)
+	got := parse(t, l)
+	if len(got) != 2 || got[0].kind != kindSkip || got[0].reason != "sparse file" || got[1].kind != kindFile || got[1].content != l.blobs[1] {
+		t.Fatalf("entries = %+v", got)
+	}
+	if l.opened != 0 {
+		t.Fatalf("opened %d content readers, want 0", l.opened)
+	}
+}
+
+func TestParseLayerSkipsPAXSparse(t *testing.T) {
+	st := openStore(t)
+	// PAX sparse 1.0: the records name the format and the real size, the
+	// map is the first block of the file's data. Go's writer refuses to
+	// emit GNU.sparse records, so a regular entry carries the PAX payload
+	// and its typeflag is patched to 'x'.
+	pax := paxPayload(map[string]string{
+		"GNU.sparse.major":    "1",
+		"GNU.sparse.minor":    "0",
+		"GNU.sparse.name":     "sparse",
+		"GNU.sparse.realsize": "4096",
+	})
+	mapBlock := make([]byte, 512)
+	copy(mapBlock, "1\n0\n1024\n")
+	archive := buildTar(t, tar.FormatUSTAR,
+		tarEntry{name: "PaxHeaders/sparse", data: pax},
+		tarEntry{name: "GNUSparseFile.0/sparse", data: string(mapBlock) + strings.Repeat("d", 1024)},
+		tarEntry{name: "after", data: "after\n"})
+	patchHeader(archive, 0, func(blk []byte) { blk[156] = tar.TypeXHeader })
+	l := newMemLayer(t, st, archive)
+	if len(l.blobs) != 2 {
+		t.Fatalf("tar-prism cut %d blobs, want 2 (the sparse data and \"after\")", len(l.blobs))
+	}
+	got := parse(t, l)
+	if len(got) != 2 {
+		t.Fatalf("parsed %d entries, want 2: %+v", len(got), got)
+	}
+	if got[0].kind != kindSkip || got[0].reason != "sparse file" || got[0].path != "sparse" {
+		t.Fatalf("sparse entry = %+v", got[0])
+	}
+	if got[1].kind != kindFile || got[1].path != "after" || got[1].content != l.blobs[1] {
+		t.Fatalf("entry after the sparse file = %+v", got[1])
+	}
+	// archive/tar reads the map from the start of the content region, which
+	// is served for real; nothing else is read.
+	if l.opened != 1 {
+		t.Fatalf("opened %d content readers, want 1 (the sparse map)", l.opened)
+	}
+}
+
+// paxPayload renders PAX records as "<len> <key>=<value>\n" lines, where
+// len counts the whole line including itself.
+func paxPayload(records map[string]string) string {
+	var b strings.Builder
+	for _, k := range slices.Sorted(maps.Keys(records)) {
+		rec := " " + k + "=" + records[k] + "\n"
+		n := len(rec) + 1
+		for len(strconv.Itoa(n))+len(rec) != n {
+			n = len(strconv.Itoa(n)) + len(rec)
+		}
+		b.WriteString(strconv.Itoa(n) + rec)
+	}
+	return b.String()
+}
+
 func TestParseLayerErrors(t *testing.T) {
 	st := openStore(t)
 	t.Run("hard link with payload", func(t *testing.T) {
@@ -412,6 +495,8 @@ func TestConvert(t *testing.T) {
 		{"whiteout at root", tar.Header{Name: ".wh.b", Typeflag: tar.TypeReg}, entry{kind: kindWhiteout, path: "b"}},
 		{"opaque", tar.Header{Name: "a/.wh..wh..opq", Typeflag: tar.TypeReg}, entry{kind: kindOpaque, path: "a"}},
 		{"opaque at root", tar.Header{Name: ".wh..wh..opq", Typeflag: tar.TypeReg}, entry{kind: kindOpaque, path: ""}},
+		{"whiteout without a name", tar.Header{Name: "a/.wh.", Typeflag: tar.TypeReg}, entry{kind: kindSkip, path: "a/.wh.", reason: "whiteout without a name"}},
+		{"whiteout of any type", tar.Header{Name: "a/.wh.b", Typeflag: tar.TypeSymlink, Linkname: "x"}, entry{kind: kindWhiteout, path: "a/b"}},
 		{"escapes", tar.Header{Name: "../x", Typeflag: tar.TypeReg}, entry{kind: kindSkip, path: "../x", reason: "path escapes the root"}},
 		{"sparse pax", tar.Header{Name: "s", Typeflag: tar.TypeReg, PAXRecords: map[string]string{"GNU.sparse.major": "1"}}, entry{kind: kindSkip, path: "s", reason: "sparse file"}},
 		{"unknown type", tar.Header{Name: "u", Typeflag: 'X', Mode: 0o644}, entry{kind: kindSkip, path: "u", mode: 0o644, reason: `unsupported type 'X'`}},
