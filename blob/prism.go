@@ -138,6 +138,18 @@ func newAmberSink(w *store.Writer) *amberSink {
 	return &amberSink{w: w, blobs: w.NewDir()}
 }
 
+// closeRecipe closes the recipe writer if tar-prism ever requested one via
+// Recipe(). recipeWriter.Close is idempotent (guarded by sync.Once), so
+// ingestPrism can defer this right after newAmberSink and still let finish()
+// close the recipe again on the success path: a panic or an early return
+// from a failed DecomposeTo can never leave the PutStream goroutine feeding
+// recipe.bin blocked on the pipe waiting for a Close that never comes.
+func (s *amberSink) closeRecipe() {
+	if s.recipe != nil {
+		s.recipe.Close()
+	}
+}
+
 // Recipe starts the recipe goroutine and hands tar-prism the pipe writer.
 func (s *amberSink) Recipe() (io.WriteCloser, error) {
 	if s.recipe != nil {
@@ -282,6 +294,7 @@ func (b *Store) ingestPrism(ctx context.Context, w *store.Writer, sp *upload.Spo
 	counter := &byteCounter{r: io.TeeReader(dec, io.MultiWriter(b3, s256))}
 
 	sink := newAmberSink(w)
+	defer sink.closeRecipe()
 	if err := tarprism.DecomposeTo(counter, sink); err != nil {
 		return prismResult{}, classifyDecomposeError(ctx, err)
 	}

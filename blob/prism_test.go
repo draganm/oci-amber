@@ -8,9 +8,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os/exec"
 	"strings"
 	"testing"
+	"time"
 
 	compprysm "github.com/draganm/comp-prysm"
 	tarprism "github.com/draganm/tar-prism"
@@ -556,5 +558,65 @@ func TestPrismWriteToCancelledContext(t *testing.T) {
 	// The blob is still fully servable afterwards.
 	if got := pullAll(t, bl); !bytes.Equal(got, data) {
 		t.Fatal("pull after cancellation differs")
+	}
+}
+
+// TestRecipeWriterCloseIsIdempotent covers I6: ingestPrism now defers
+// sink.closeRecipe() right after newAmberSink so that finish() (the success
+// path) can still close the same recipeWriter again without it being an
+// error or a second wait on an already-closed pipe.
+func TestRecipeWriterCloseIsIdempotent(t *testing.T) {
+	pr, pw := io.Pipe()
+	rw := &recipeWriter{pw: pw, done: make(chan struct{})}
+	go func() {
+		defer close(rw.done)
+		io.Copy(io.Discard, pr)
+	}()
+	if err := rw.Close(); err != nil {
+		t.Fatalf("first Close: %v", err)
+	}
+	if err := rw.Close(); err != nil {
+		t.Fatalf("second Close: %v", err)
+	}
+}
+
+// TestAmberSinkCloseRecipeUnblocksPutStreamGoroutine covers I6's actual
+// failure mode: DecomposeTo requests a recipe (starting the PutStream
+// goroutine on the other end of the pipe) and then fails or panics before
+// sink.finish() ever runs. Without the deferred closeRecipe, that goroutine
+// would block forever reading a pipe nobody closes. sink.recipe.done is the
+// "done channel exposed for tests": it closes only once PutStream has
+// returned, so a timeout here means the goroutine is stuck.
+func TestAmberSinkCloseRecipeUnblocksPutStreamGoroutine(t *testing.T) {
+	_, st, _ := newTestStore(t, Options{})
+	ctx := context.Background()
+	w := st.NewWriter(ctx)
+	defer w.Abort()
+
+	sink := newAmberSink(w)
+	if _, err := sink.Recipe(); err != nil {
+		t.Fatalf("Recipe: %v", err)
+	}
+
+	closed := make(chan struct{})
+	go func() {
+		sink.closeRecipe() // stands in for ingestPrism's deferred call
+		close(closed)
+	}()
+	select {
+	case <-closed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("closeRecipe did not return: the PutStream goroutine is blocked on the recipe pipe")
+	}
+	select {
+	case <-sink.recipe.done:
+	default:
+		t.Fatal("closeRecipe returned but the PutStream goroutine has not finished")
+	}
+
+	// The success path (finish) closing the same recipe writer again must
+	// still be safe and must not block.
+	if err := sink.recipe.Close(); err != nil {
+		t.Fatalf("second Close: %v", err)
 	}
 }
