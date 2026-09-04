@@ -151,6 +151,26 @@ func TestPlanNoTagsIsAnError(t *testing.T) {
 	}
 }
 
+func TestPlanSameImageListedTwice(t *testing.T) {
+	// docker save busybox:1.37 busybox:latest, when both tags name the same
+	// image, writes two index.json descriptors with the same digest and one
+	// manifest.json entry carrying both RepoTags.
+	b, _, _, idx := busyboxLike(t, "busybox:1.37", "busybox:latest")
+	b.Top(idx, idx)
+	a := openBuilder(t, b)
+	p, err := a.Plan(PlanOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(p.Entries) != 1 {
+		t.Fatalf("entries = %+v, want exactly 1 for the doubly-listed image", p.Entries)
+	}
+	want := []Name{{"busybox", "1.37"}, {"busybox", "latest"}}
+	if got := p.Entries[0].Names; len(got) != 2 || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("names = %v, want %v", got, want)
+	}
+}
+
 func TestPlanMultiImageArchive(t *testing.T) {
 	b := archivetest.New()
 	cfgA, cfgB := []byte(`{"os":"linux","a":1}`), []byte(`{"os":"linux","b":1}`)

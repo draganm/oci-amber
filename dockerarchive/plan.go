@@ -9,7 +9,10 @@ import (
 	"github.com/draganm/oci-amber/oci"
 )
 
-// attestationAnnotation marks a BuildKit attestation manifest in an index.
+// attestationTypeAnnotation and attestationType together mark a BuildKit
+// attestation manifest in an index: attestationTypeAnnotation is the
+// annotation key on the descriptor that references it, attestationType the
+// value that identifies an attestation manifest.
 const (
 	attestationTypeAnnotation = "vnd.docker.reference.type"
 	attestationType           = "attestation-manifest"
@@ -77,6 +80,7 @@ type node struct {
 // blobs and manifests and assigns names.
 func (a *Archive) Plan(opts PlanOptions) (*Plan, error) {
 	var roots []*node
+	seenRoot := map[oci.Digest]bool{}
 	for i, d := range a.Index.Manifests {
 		n, present, err := a.resolve(d)
 		if err != nil {
@@ -85,6 +89,10 @@ func (a *Archive) Plan(opts PlanOptions) (*Plan, error) {
 		if !present {
 			return nil, fmt.Errorf("dockerarchive: %s entry %d: manifest %s is not in the archive", IndexFile, i, d.Digest)
 		}
+		if seenRoot[n.desc.Digest] {
+			continue // the same image listed twice (e.g. one image tagged more than once)
+		}
+		seenRoot[n.desc.Digest] = true
 		roots = append(roots, n)
 	}
 	p := &Plan{}
@@ -234,10 +242,12 @@ func pruneIndex(body []byte, keep []int, children []*node) ([]byte, error) {
 			}
 			desc["digest"], _ = json.Marshal(children[j].desc.Digest)
 			desc["size"], _ = json.Marshal(children[j].desc.Size)
-			if raw, err := json.Marshal(desc); err == nil {
-				kept = append(kept, raw)
-				continue
+			rewritten, err := json.Marshal(desc)
+			if err != nil {
+				return nil, fmt.Errorf("manifests[%d]: %w", i, err)
 			}
+			kept = append(kept, rewritten)
+			continue
 		}
 		kept = append(kept, raw)
 	}
@@ -264,13 +274,16 @@ func (a *Archive) assignNames(p *Plan, roots []*node, override []string) error {
 		}
 		return nil
 	}
-	// Map every present image manifest's config digest to its root.
-	configRoot := map[oci.Digest]int{}
+	// Map every present image manifest's config digest to every root that
+	// uses it: the same config can be reachable from more than one root
+	// (e.g. shared by two distinct top-level indexes), and manifest.json
+	// has to name all of them.
+	configRoot := map[oci.Digest][]int{}
 	for i, r := range roots {
 		var walk func(n *node)
 		walk = func(n *node) {
 			if n.manifest.Config != nil {
-				configRoot[n.manifest.Config.Digest] = i
+				configRoot[n.manifest.Config.Digest] = append(configRoot[n.manifest.Config.Digest], i)
 			}
 			for _, c := range n.children {
 				walk(c)
@@ -284,7 +297,7 @@ func (a *Archive) assignNames(p *Plan, roots []*node, override []string) error {
 		if err != nil {
 			return fmt.Errorf("dockerarchive: %s: Config %q is not a blob path", ManifestFile, le.Config)
 		}
-		i, ok := configRoot[d]
+		is, ok := configRoot[d]
 		if !ok {
 			return fmt.Errorf("dockerarchive: %s names config %s, which no manifest in %s uses", ManifestFile, d, IndexFile)
 		}
@@ -293,7 +306,10 @@ func (a *Archive) assignNames(p *Plan, roots []*node, override []string) error {
 			if err != nil {
 				return fmt.Errorf("dockerarchive: %s: %w", ManifestFile, err)
 			}
-			if ok {
+			if !ok {
+				continue
+			}
+			for _, i := range is {
 				p.Entries[i].Names = appendName(p.Entries[i].Names, n)
 			}
 		}
