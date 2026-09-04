@@ -53,6 +53,19 @@ func (rc *recorder) add(r slog.Record) {
 	rc.recs = append(rc.recs, r.Clone())
 }
 
+// count returns how many recorded records carry msg.
+func (rc *recorder) count(msg string) int {
+	rc.mu.Lock()
+	defer rc.mu.Unlock()
+	n := 0
+	for _, r := range rc.recs {
+		if r.Message == msg {
+			n++
+		}
+	}
+	return n
+}
+
 // atLeast returns the recorded records of the given level or higher.
 func (rc *recorder) atLeast(level slog.Level) []slog.Record {
 	rc.mu.Lock()

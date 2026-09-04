@@ -287,14 +287,10 @@ func (b *Store) Put(ctx context.Context, sp *upload.Spool) (*Meta, error) {
 	switch {
 	case err == nil:
 		// Step 2: whole-blob dedup.
-		stats := store.Stats{LogicalBytes: size, DedupedBytes: size}
-		b.recordRecent(d, stats)
+		meta := b.dedupHit(existing.Meta)
 		if err := sp.Remove(); err != nil {
 			b.log.Warn("removing spool", "digest", d, "error", err)
 		}
-		meta := existing.Meta
-		meta.Stats = stats
-		b.log.Info("blob already present", "digest", d, "size", size)
 		return &meta, nil
 	case !errors.Is(err, ErrNotFound):
 		return nil, err
@@ -376,6 +372,35 @@ func (b *Store) Put(ctx context.Context, sp *upload.Spool) (*Meta, error) {
 		b.log.Warn("removing spool", "digest", d, "error", err)
 	}
 	return &meta, nil
+}
+
+// Reuse is Put's whole-blob dedup check for an upload whose digest is known
+// before its bytes are: a monolithic POST or a PUT that names the digest.
+// When oci/blob/<d> is published it does what Put does on a dedup hit (the
+// recent-uploads entry and the "blob already present" line) and returns
+// the blob's Meta carrying the stats of a fully deduplicated upload, so the
+// caller can answer without reading the upload at all. Otherwise it returns
+// ErrNotFound and records nothing. It does not serialize on the digest: a
+// finalization of d still in flight is not published yet, so the upload
+// goes ahead and Put's own check, which is serialized, catches it.
+func (b *Store) Reuse(d oci.Digest) (*Meta, error) {
+	existing, err := b.Open(d)
+	if err != nil {
+		return nil, err
+	}
+	meta := b.dedupHit(existing.Meta)
+	return &meta, nil
+}
+
+// dedupHit records an upload of a blob that is already published: the
+// recent-uploads entry counts it as fully deduplicated and the hit is
+// logged. It returns existing with those stats.
+func (b *Store) dedupHit(existing Meta) Meta {
+	stats := store.Stats{LogicalBytes: existing.Size, DedupedBytes: existing.Size}
+	b.recordRecent(existing.Digest, stats)
+	b.log.Info("blob already present", "digest", existing.Digest, "size", existing.Size)
+	existing.Stats = stats
+	return existing
 }
 
 // finalizeRaw stores the verbatim spool bytes under the given reason and

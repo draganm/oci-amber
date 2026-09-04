@@ -108,7 +108,6 @@ Collected from the per-task and whole-branch reviews of the initial implementati
 - error-log assertion in pushInterrupted matches any PUT "request failed", not this session's path (registry/e2e_test.go:915)
 - fault injection by renaming the spool file depends on unexported layout (registry/e2e_test.go:897)
 - io.ErrUnexpectedEOF also over-matches local truncated reads in isClientGone (registry/errors.go:113)
-- README omits the "blob already present" Info line for whole-blob dedup hits (README.md:130)
 - crane test only logs the appended layer's kind; roundtrip-failed on crane's gzip is under investigation (cmd/oci-amber/crane_test.go:156)
 - craneHeadBlob uses http.Head/DefaultTransport; e2e `check` closure has 8 positional params
 

@@ -121,6 +121,16 @@ repository mounts, manifests and indexes by tag and digest, `tags/list` and
 schemas), and the standard error envelope
 `{"errors":[{"code":…,"message":…,"detail":…}]}`.
 
+An upload whose digest is known before its bytes arrive, that is a
+monolithic `POST ?digest=` or the `PUT ?digest=` that completes a session,
+is checked against the stored blobs first. When the digest already exists
+the answer is `201` without the request body being read: a small unread
+body is drained, a large one makes the server close the connection behind
+the response, and a session completed this way is dropped together with
+whatever was `PATCH`ed into it. The bytes such a client sends are never
+compared with the digest; the blob stored under it is the right one
+regardless of what the client had.
+
 Manifests are capped at 4 MiB (`413`). Blob uploads are not size limited.
 Range requests on prism-stored layers are answered with the full body.
 
@@ -148,8 +158,9 @@ store, `deduped_bytes` the part that already existed, and `disk_bytes` what
 was actually appended to pack segments; the blob root and its `meta.json` are
 not counted. A blob that is uploaded again is not re-ingested and counts as
 fully deduplicated: instead of a `blob stored` line, a whole-blob dedup hit
-(the pushed digest already exists) logs `msg="blob already present"` at Info
-with `digest` and `size`, and nothing is written.
+(the pushed digest already exists, whether that was found before the body
+was read or at finalization) logs `msg="blob already present"` at Info with
+`digest` and `size`, and nothing is written.
 
 After every manifest or index push, one line per image (an identical
 re-push logs again, with `disk_bytes=0` and `compression_ratio=+Inf`):

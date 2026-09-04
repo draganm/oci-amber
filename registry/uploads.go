@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/draganm/oci-amber/blob"
 	"github.com/draganm/oci-amber/oci"
 	"github.com/draganm/oci-amber/upload"
 )
@@ -30,6 +31,33 @@ func setUploadHeaders(w http.ResponseWriter, name string, sess *upload.Session) 
 	h.Set("Location", uploadLocation(name, sess.ID))
 	h.Set("Docker-Upload-UUID", sess.ID)
 	h.Set("Range", uploadRange(sess.Offset()))
+}
+
+// writeBlobCreated answers 201 for the blob d: the end of an upload, a
+// mount, or an upload skipped because d was already stored.
+func writeBlobCreated(w http.ResponseWriter, name string, d oci.Digest) {
+	w.Header().Set("Location", blobLocation(name, d))
+	w.Header().Set("Docker-Content-Digest", d.String())
+	w.WriteHeader(http.StatusCreated)
+}
+
+// knownBlob reports whether want is already stored. A hit is recorded as a
+// whole-blob dedup of this upload (blob.Store.Reuse), so the caller answers
+// 201 without reading the request body at all. net/http takes care of the
+// unread body: a small one is drained so the connection stays alive, a
+// large one makes it close the connection behind the response, which every
+// Go client turns into the 201 rather than a write error. The bytes the
+// client would have sent are never compared with want: the blob stored
+// under want is the right one whatever the client had.
+func (s *server) knownBlob(want oci.Digest) (bool, error) {
+	_, err := s.blobs.Reuse(want)
+	if errors.Is(err, blob.ErrNotFound) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // discardSession drops a session. A session that is already gone (swept,
@@ -90,9 +118,7 @@ func (s *server) startUpload(w http.ResponseWriter, r *http.Request, name string
 				return
 			}
 			if exists {
-				w.Header().Set("Location", blobLocation(name, d))
-				w.Header().Set("Docker-Content-Digest", d.String())
-				w.WriteHeader(http.StatusCreated)
+				writeBlobCreated(w, name, d)
 				return
 			}
 		}
@@ -101,6 +127,15 @@ func (s *server) startUpload(w http.ResponseWriter, r *http.Request, name string
 		want, err := oci.ParseDigest(q.Get("digest"))
 		if err != nil {
 			writeError(w, oci.NewError(oci.CodeDigestInvalid, "invalid digest %q: %v", q.Get("digest"), err))
+			return
+		}
+		known, err := s.knownBlob(want)
+		if err != nil {
+			s.handleError(w, r, err)
+			return
+		}
+		if known {
+			writeBlobCreated(w, name, want)
 			return
 		}
 		sess, err := s.uploads.Create()
@@ -156,7 +191,9 @@ func (s *server) patchUpload(w http.ResponseWriter, r *http.Request, name, id st
 	w.WriteHeader(http.StatusAccepted)
 }
 
-// putUpload appends the optional body and finalizes the session.
+// putUpload appends the optional body and finalizes the session. A digest
+// that is already stored ends the upload right there: the session and
+// whatever was PATCHed into it are dropped, the body stays unread.
 func (s *server) putUpload(w http.ResponseWriter, r *http.Request, name, id string) {
 	unlock := s.sessLocks.Lock(id)
 	defer unlock()
@@ -175,6 +212,16 @@ func (s *server) putUpload(w http.ResponseWriter, r *http.Request, name, id stri
 		writeError(w, oci.NewError(oci.CodeDigestInvalid, "invalid digest %q: %v", dq, err))
 		return
 	}
+	known, err := s.knownBlob(want)
+	if err != nil {
+		s.handleError(w, r, err)
+		return
+	}
+	if known {
+		s.discardSession(sess.ID)
+		writeBlobCreated(w, name, want)
+		return
+	}
 	if _, err := sess.Append(r.Body); err != nil {
 		s.handleError(w, r, err)
 		return
@@ -183,8 +230,9 @@ func (s *server) putUpload(w http.ResponseWriter, r *http.Request, name, id stri
 }
 
 // finalize checks the session's digest against the requested one, stores
-// the blob (blob.Store.Put does the whole-blob dedup, analysis, ingest and
-// publication) and answers 201. monolithic marks a POST ?digest= upload,
+// the blob (blob.Store.Put does the analysis, ingest and publication, and
+// the whole-blob dedup for a digest that was published while this upload
+// was in flight) and answers 201. monolithic marks a POST ?digest= upload,
 // whose session id the client never learns, so it is discarded on every
 // failure; a PUT's session survives internal failures so the client can
 // retry the PUT. A digest mismatch discards the session either way: its
@@ -217,9 +265,7 @@ func (s *server) finalize(w http.ResponseWriter, r *http.Request, name string, s
 	}
 	s.discardSession(sess.ID)
 	s.removeSpool(sp, sess.ID)
-	w.Header().Set("Location", blobLocation(name, meta.Digest))
-	w.Header().Set("Docker-Content-Digest", meta.Digest.String())
-	w.WriteHeader(http.StatusCreated)
+	writeBlobCreated(w, name, meta.Digest)
 }
 
 // uploadStatus handles GET: the current offset of a session.
