@@ -67,7 +67,7 @@ variable in the last column; a flag on the command line wins.
 | Flag | Default | Meaning | Environment |
 |---|---|---|---|
 | `--store` | required | store directory (created on first start) | `OCI_AMBER_STORE` |
-| `--work-dir` | `<store>/work` | spilled uploads and comp-prysm spool; emptied at startup | `OCI_AMBER_WORK_DIR` |
+| `--work-dir` | `<store>/work` | parent of `<work-dir>/oci-amber/`, where spilled uploads and the comp-prysm spool live; at startup the *contents* of `<work-dir>/oci-amber/uploads` and `<work-dir>/oci-amber/spool` are deleted and nothing else under `--work-dir` is touched | `OCI_AMBER_WORK_DIR` |
 | `--listen` | `:5000` | listen address | `OCI_AMBER_LISTEN` |
 | `--max-in-memory` | `64MiB` | upload spool and comp-prysm spool threshold before spilling to `--work-dir`; units `B`, `KiB`, `MiB`, `GiB`, `KB`, `MB`, `GB` | `OCI_AMBER_MAX_IN_MEMORY` |
 | `--analyze-parallelism` | `2` | comp-prysm candidate workers per blob (each holds one engine working set) | `OCI_AMBER_ANALYZE_PARALLELISM` |
@@ -81,12 +81,12 @@ variable in the last column; a flag on the command line wins.
 ## Storage layout
 
 ```
-<store>/oci-amber.json   chunking and segment parameters, written on creation
-<store>/packstore        amber pack segments
-<store>/refs             amber references
-<store>/gc               amber collector state
-<store>/work/uploads     upload sessions that outgrew --max-in-memory
-<store>/work/spool       comp-prysm temporary files
+<store>/oci-amber.json          chunking and segment parameters, written on creation
+<store>/packstore               amber pack segments
+<store>/refs                    amber references
+<store>/gc                      amber collector state
+<store>/work/oci-amber/uploads  upload sessions that outgrew --max-in-memory
+<store>/work/oci-amber/spool    comp-prysm temporary files
 ```
 
 `oci-amber.json` pins the content-defined chunking (min 32 KiB, normal

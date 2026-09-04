@@ -65,8 +65,11 @@ type recentEntry struct {
 	at    time.Time
 }
 
-// New returns a Store over st. It empties and recreates <WorkDir>/spool,
-// the directory comp-prysm spills to.
+// New returns a Store over st. It creates <WorkDir>/spool, the directory
+// comp-prysm spills to, if it does not exist and removes what a previous
+// process left in it. Only the contents of that one directory are deleted:
+// neither it nor WorkDir is ever removed, because WorkDir is derived from
+// an operator-supplied path (see cmd/oci-amber).
 func New(st *store.Store, opts Options, log *slog.Logger) (*Store, error) {
 	if st == nil {
 		return nil, errors.New("blob: nil store")
@@ -93,11 +96,11 @@ func New(st *store.Store, opts Options, log *slog.Logger) (*Store, error) {
 		opts.RecentTTL = time.Hour
 	}
 	spool := filepath.Join(opts.WorkDir, spoolDirName)
-	if err := os.RemoveAll(spool); err != nil {
-		return nil, fmt.Errorf("blob: emptying %s: %w", spool, err)
-	}
 	if err := os.MkdirAll(spool, 0o755); err != nil {
 		return nil, fmt.Errorf("blob: creating %s: %w", spool, err)
+	}
+	if err := emptyDir(spool); err != nil {
+		return nil, fmt.Errorf("blob: emptying %s: %w", spool, err)
 	}
 	return &Store{
 		st:       st,
@@ -106,6 +109,20 @@ func New(st *store.Store, opts Options, log *slog.Logger) (*Store, error) {
 		finalize: make(chan struct{}, opts.MaxConcurrentFinalize),
 		recent:   make(map[oci.Digest]recentEntry),
 	}, nil
+}
+
+// emptyDir removes every entry of dir, leaving dir itself in place.
+func emptyDir(dir string) error {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return err
+	}
+	for _, e := range entries {
+		if err := os.RemoveAll(filepath.Join(dir, e.Name())); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // Exists reports whether oci/blob/<d> is published.

@@ -33,7 +33,11 @@ type Manager struct {
 }
 
 // NewManager creates dir if needed, deletes everything left in it from a
-// previous process, and starts the sweeper. maxInMemory is the number of
+// previous process, and starts the sweeper. dir belongs to the manager:
+// only its contents are ever removed, never the directory itself, and the
+// caller must not point it at a directory it shares with anything else
+// (cmd/oci-amber puts it under <work-dir>/oci-amber/uploads for exactly
+// that reason). maxInMemory is the number of
 // bytes a session keeps in memory before spilling (0 spills immediately)
 // and timeout is the idle time after which a session expires; it must be
 // positive. A nil log uses slog.Default().
@@ -70,7 +74,8 @@ func NewManager(dir string, maxInMemory int64, timeout time.Duration, log *slog.
 	return m, nil
 }
 
-// emptyDir removes every entry of dir and returns how many it removed.
+// emptyDir removes every entry of dir, leaving dir itself in place, and
+// returns how many entries it removed.
 func emptyDir(dir string) (int, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {

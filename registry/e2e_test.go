@@ -48,7 +48,7 @@ const (
 
 // e2eMaxInMemory is the upload-session and comp-prysm spool threshold. Layers
 // A and C are larger, so both spill paths run and their sessions are backed
-// by a file under <work>/uploads/<id>.
+// by a file under <work>/oci-amber/uploads/<id>.
 const e2eMaxInMemory = 1 << 20
 
 // Regular-file counts of the fixture tars: tar-prism makes one blob per
@@ -164,9 +164,12 @@ func newE2EEnv(t *testing.T) *e2eEnv {
 		}
 	})
 
+	// The same layout `oci-amber serve` builds: the operator names the work
+	// directory, the registry owns <work-dir>/oci-amber inside it.
 	work := filepath.Join(dir, "work")
+	ownDir := filepath.Join(work, "oci-amber")
 	blobs, err := blob.New(st, blob.Options{
-		WorkDir:               work,
+		WorkDir:               ownDir,
 		MaxInMemory:           e2eMaxInMemory,
 		AnalyzeParallelism:    2,
 		AnalyzeTimeout:        15 * time.Minute,
@@ -177,7 +180,7 @@ func newE2EEnv(t *testing.T) *e2eEnv {
 	if err != nil {
 		t.Fatalf("blob.New: %v", err)
 	}
-	uploadDir := filepath.Join(work, "uploads")
+	uploadDir := filepath.Join(ownDir, "uploads")
 	if err := os.MkdirAll(uploadDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -877,7 +880,7 @@ func (c *e2eClient) referrers(name string, subject oci.Digest, artifactType stri
 }
 
 // pushInterrupted uploads data (which must exceed e2eMaxInMemory, so the
-// session is backed by <work>/uploads/<id>), then makes the finalizing PUT
+// session is backed by <work>/oci-amber/uploads/<id>), then makes the finalizing PUT
 // fail with an I/O error on the spool by renaming the file away. The
 // registry must answer 500 with the empty envelope, publish nothing, log
 // the failure at error level and keep the session with all its bytes, so

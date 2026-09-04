@@ -24,6 +24,16 @@ func TestNewCreatesAndEmptiesSpoolDir(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(spool, "leftover"), []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	before, err := os.Stat(spool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A sibling of spool/ under the work directory belongs to whoever put
+	// it there; New only ever empties its own directory.
+	sibling := filepath.Join(work, "not-ours")
+	if err := os.WriteFile(sibling, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	b, _, _ := newTestStore(t, Options{WorkDir: work})
 	if got := spoolDirOf(b); got != spool {
 		t.Fatalf("spool dir = %q, want %q", got, spool)
@@ -34,6 +44,18 @@ func TestNewCreatesAndEmptiesSpoolDir(t *testing.T) {
 	}
 	if len(entries) != 0 {
 		t.Fatalf("spool dir not emptied: %v", entries)
+	}
+	after, err := os.Stat(spool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Only the contents go: the directory itself is never removed and
+	// recreated, so its permissions, ownership or mount survive.
+	if !os.SameFile(before, after) {
+		t.Fatal("the spool directory was removed and recreated instead of emptied")
+	}
+	if _, err := os.Stat(sibling); err != nil {
+		t.Fatalf("%s is not the blob store's to delete: %v", sibling, err)
 	}
 }
 

@@ -36,6 +36,12 @@ const (
 	// envPrefix plus the upper-cased, underscored flag name is the environment
 	// variable that can set a flag (--max-in-memory -> OCI_AMBER_MAX_IN_MEMORY).
 	envPrefix = "OCI_AMBER_"
+	// workSubdir is the directory the registry owns inside --work-dir. All
+	// in-flight state lives under it, and it is the only thing under
+	// --work-dir that is ever created or deleted, so --work-dir may be a
+	// scratch directory (/var/tmp, say) the operator uses for other things
+	// as well.
+	workSubdir = "oci-amber"
 
 	defaultListen             = ":5000"
 	defaultMaxInMemory        = "64MiB"
@@ -110,7 +116,7 @@ func newApp(serve func(ctx context.Context, cfg config) error) *cli.App {
 func serveFlags() []cli.Flag {
 	return []cli.Flag{
 		&cli.StringFlag{Name: "store", Usage: "store `directory` (required)", EnvVars: envVar("store"), Required: true},
-		&cli.StringFlag{Name: "work-dir", Usage: "`directory` for spilled uploads and the comp-prysm spool (default: <store>/work)", EnvVars: envVar("work-dir")},
+		&cli.StringFlag{Name: "work-dir", Usage: "`directory` holding <work-dir>/oci-amber/{uploads,spool}, whose contents are deleted at startup; nothing else under it is touched (default: <store>/work)", EnvVars: envVar("work-dir")},
 		&cli.StringFlag{Name: "listen", Value: defaultListen, Usage: "listen `address`", EnvVars: envVar("listen")},
 		&cli.StringFlag{Name: "max-in-memory", Value: defaultMaxInMemory, Usage: "upload spool and comp-prysm spool threshold (`size` with unit B, KiB, MiB, GiB, KB, MB or GB)", EnvVars: envVar("max-in-memory")},
 		&cli.IntFlag{Name: "analyze-parallelism", Value: defaultAnalyzeParallelism, Usage: "comp-prysm candidate `workers` per blob", EnvVars: envVar("analyze-parallelism")},
@@ -194,16 +200,15 @@ func run(ctx context.Context, cfg config) error {
 	if workDir == "" {
 		workDir = filepath.Join(cfg.Store, "work")
 	}
-	spoolDir := filepath.Join(workDir, "spool")
-	uploadsDir := filepath.Join(workDir, "uploads")
-	// The work directory only ever holds in-flight state, so both halves are
-	// emptied at startup. upload.NewManager empties uploads/ itself and
-	// blob.New recreates spool/.
-	if err := os.RemoveAll(spoolDir); err != nil {
-		return fmt.Errorf("emptying %s: %w", spoolDir, err)
-	}
-	if err := os.MkdirAll(workDir, 0o755); err != nil {
-		return fmt.Errorf("creating work directory %s: %w", workDir, err)
+	// Everything in flight lives under <work-dir>/oci-amber, which belongs
+	// to the registry; nothing else under the operator's --work-dir is
+	// created, read or deleted. The two owned subdirectories clean
+	// themselves at startup: upload.NewManager empties uploads/ and
+	// blob.New empties spool/, in both cases only the contents.
+	ownDir := filepath.Join(workDir, workSubdir)
+	uploadsDir := filepath.Join(ownDir, "uploads")
+	if err := os.MkdirAll(ownDir, 0o755); err != nil {
+		return fmt.Errorf("creating work directory %s: %w", ownDir, err)
 	}
 
 	st, err := store.Open(cfg.Store, store.Options{GCInterval: cfg.GCInterval, Logger: log})
@@ -212,7 +217,7 @@ func run(ctx context.Context, cfg config) error {
 	}
 
 	blobs, err := blob.New(st, blob.Options{
-		WorkDir:               workDir,
+		WorkDir:               ownDir,
 		MaxInMemory:           cfg.MaxInMemory,
 		AnalyzeParallelism:    cfg.AnalyzeParallelism,
 		AnalyzeTimeout:        cfg.AnalyzeTimeout,

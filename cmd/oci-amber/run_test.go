@@ -65,10 +65,23 @@ func writeLeftover(t *testing.T, path string) {
 func TestRunServesV2(t *testing.T) {
 	storeDir := filepath.Join(t.TempDir(), "store")
 	workDir := filepath.Join(storeDir, "work")
-	spoolLeftover := filepath.Join(workDir, "spool", "leftover")
-	uploadLeftover := filepath.Join(workDir, "uploads", "leftover")
+	ownDir := filepath.Join(workDir, workSubdir)
+	spoolLeftover := filepath.Join(ownDir, "spool", "leftover")
+	uploadLeftover := filepath.Join(ownDir, "uploads", "leftover")
 	writeLeftover(t, spoolLeftover)
 	writeLeftover(t, uploadLeftover)
+	// --work-dir may be a directory the operator also uses for other
+	// things (a shared scratch disk). The registry owns exactly
+	// <work-dir>/oci-amber and must not delete anything beside it, not even
+	// under the names it used to occupy directly.
+	operatorFiles := []string{
+		filepath.Join(workDir, "operator-data"),
+		filepath.Join(workDir, "spool", "operator-data"),
+		filepath.Join(workDir, "uploads", "operator-data"),
+	}
+	for _, p := range operatorFiles {
+		writeLeftover(t, p)
+	}
 
 	logs := &syncBuffer{}
 	cfg := testConfig(storeDir, logs)
@@ -114,6 +127,11 @@ func TestRunServesV2(t *testing.T) {
 	for _, p := range []string{spoolLeftover, uploadLeftover} {
 		if _, err := os.Stat(p); !os.IsNotExist(err) {
 			t.Fatalf("%s should have been removed at startup, stat err = %v", p, err)
+		}
+	}
+	for _, p := range operatorFiles {
+		if _, err := os.Stat(p); err != nil {
+			t.Fatalf("%s is not the registry's to delete: %v", p, err)
 		}
 	}
 

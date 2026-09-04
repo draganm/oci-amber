@@ -95,9 +95,12 @@ defaults is refused with a clear error, because changing chunk boundaries
 silently defeats deduplication against existing content.
 
 The store directory layout is `<store>/packstore`, `<store>/refs`,
-`<store>/gc` and `<store>/oci-amber.json`. The work directory (default
-`<store>/work`) holds `uploads/` (spilled upload sessions) and `spool/`
-(comp-prysm's temp dir). Both are emptied at startup.
+`<store>/gc` and `<store>/oci-amber.json`. In-flight state lives under
+`<work-dir>/oci-amber/` (default work directory `<store>/work`), a
+subdirectory the registry owns: `uploads/` (spilled upload sessions) and
+`spool/` (comp-prysm's temp dir). The contents of those two are removed at
+startup; neither they nor anything else under the operator-supplied
+`--work-dir` is ever deleted.
 
 ## Amber data model
 
@@ -233,8 +236,8 @@ random 128-bit hex id. It holds:
 
 - a `bytes.Buffer` while total bytes are at or below `--max-in-memory`
   (default 64 MiB); the first write that would exceed it creates
-  `<work>/uploads/<id>`, writes the buffer out, drops the buffer and appends
-  to the file from then on;
+  `<work-dir>/oci-amber/uploads/<id>`, writes the buffer out, drops the
+  buffer and appends to the file from then on;
 - the byte count, a running sha256 over every byte received, and the last
   activity time.
 
@@ -261,7 +264,7 @@ body has been appended, and on a monolithic `POST ?digest=`.
    (default `max(1, NumCPU/2)`). This bounds engine-search CPU and spool
    memory.
 4. **Pass one: analyze.** `compprysm.Analyze(ctx, spool, &Options{TempDir:
-   <work>/spool, MaxInMemory: --max-in-memory, Parallelism:
+   <work-dir>/oci-amber/spool, MaxInMemory: --max-in-memory, Parallelism:
    --analyze-parallelism (default 2)})` under a child context with
    `--analyze-timeout` (default 15 min). No `Uncompressed` sink is attached.
 5. **Classify.**
