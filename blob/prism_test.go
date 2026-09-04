@@ -620,3 +620,72 @@ func TestAmberSinkCloseRecipeUnblocksPutStreamGoroutine(t *testing.T) {
 		t.Fatalf("second Close: %v", err)
 	}
 }
+
+func TestBlobPrismParts(t *testing.T) {
+	b, _, _ := newTestStore(t, Options{VerifyRoundTrip: true})
+	ctx := context.Background()
+	content := textBytes(5000, 11)
+	data := gzipBytes(t, tarBytes(t, "etc/motd", content), gzip.DefaultCompression)
+	meta, err := b.Put(ctx, spoolOf(data))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if meta.Kind != KindPrism {
+		t.Fatalf("kind = %s, want prism", meta.Kind)
+	}
+	bl, err := b.Open(meta.Digest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := bl.Prism()
+	if err != nil {
+		t.Fatal(err)
+	}
+	idx, err := p.Index()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(idx.Entries) != 1 || idx.Entries[0].Name != "etc/motd" {
+		t.Fatalf("index entries = %+v", idx.Entries)
+	}
+	k, err := p.BlobKey(0, idx.Entries[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if int64(k.Length()) != idx.Entries[0].Size {
+		t.Fatalf("blob key length %d, index size %d", k.Length(), idx.Entries[0].Size)
+	}
+	r, err := p.Blob(0, idx.Entries[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := io.ReadAll(r)
+	r.Close()
+	if err != nil || !bytes.Equal(got, content) {
+		t.Fatalf("blob content differs (%v)", err)
+	}
+	rc, err := p.Recipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	recipe, err := io.ReadAll(rc)
+	rc.Close()
+	if err != nil || !bytes.HasPrefix(recipe, []byte("etc/motd\x00")) {
+		t.Fatalf("recipe is %d bytes and does not start with the header (%v)", len(recipe), err)
+	}
+	if _, err := p.BlobKey(0, tarprism.Entry{Blob: "blobs/00000009", Size: 1}); err == nil {
+		t.Fatal("BlobKey of an absent blob succeeded")
+	}
+
+	raw, err := b.Put(ctx, spoolOf([]byte(`{"architecture":"amd64"}`)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rb, err := b.Open(raw.Digest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := rb.Prism(); !errors.Is(err, ErrNotPrism) {
+		t.Fatalf("Prism() on a raw blob = %v, want ErrNotPrism", err)
+	}
+}
