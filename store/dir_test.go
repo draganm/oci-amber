@@ -369,6 +369,8 @@ func TestDirAddEntryRejects(t *testing.T) {
 		{"no type bits", fstree.Entry{Name: []byte("a"), Mode: 0o644, ContentKey: file[:]}},
 		{"bad name", fstree.Entry{Name: []byte("a/b"), Mode: TypeReg | 0o644, ContentKey: file[:]}},
 		{"both xattr forms", fstree.Entry{Name: []byte("a"), Mode: TypeReg | 0o644, ContentKey: file[:], XattrsIn: []byte{0xa0}, XattrsKey: file[:]}},
+		{"xattrs key of the wrong type", fstree.Entry{Name: []byte("a"), Mode: TypeReg | 0o644, ContentKey: file[:], XattrsKey: file[:]}},
+		{"malformed xattrs key", fstree.Entry{Name: []byte("a"), Mode: TypeReg | 0o644, ContentKey: file[:], XattrsKey: []byte{1, 2, 3}}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

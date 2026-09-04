@@ -131,6 +131,15 @@ func validatePayload(e fstree.Entry) error {
 	if len(e.XattrsIn) > 0 && len(e.XattrsKey) > 0 {
 		return errors.New("inline and spilled xattrs are exclusive")
 	}
+	if len(e.XattrsKey) > 0 {
+		k, err := key.Parse(e.XattrsKey)
+		if err != nil {
+			return fmt.Errorf("xattrs key: %w", err)
+		}
+		if t := k.Type(); t != key.XattrSet {
+			return fmt.Errorf("xattrs key %s is a %s, not an XattrSet", k, t)
+		}
+	}
 	return nil
 }
 
