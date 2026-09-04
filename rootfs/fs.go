@@ -95,18 +95,23 @@ func (f *FS) List(p, after string, limit int) ([]Entry, bool, error) {
 	if err != nil {
 		return nil, false, err
 	}
+	return f.ListDir(dir, after, limit)
+}
+
+// ListDir is List for an already resolved directory entry.
+func (f *FS) ListDir(dir Entry, after string, limit int) ([]Entry, bool, error) {
 	if !dir.IsDir() {
-		return nil, false, fmt.Errorf("%w: %s", ErrNotDir, Clean(p))
+		return nil, false, fmt.Errorf("%w: %s", ErrNotDir, dir.Name)
 	}
 	raw, more, err := f.st.ListDir(dir.Content, after, limit)
 	if err != nil {
-		return nil, false, fmt.Errorf("rootfs: listing %s: %w", Clean(p), err)
+		return nil, false, fmt.Errorf("rootfs: listing %s: %w", dir.Name, err)
 	}
 	entries := make([]Entry, 0, len(raw))
 	for _, r := range raw {
 		e, err := fromFstree(r)
 		if err != nil {
-			return nil, false, fmt.Errorf("rootfs: %s: %w", Clean(p), err)
+			return nil, false, fmt.Errorf("rootfs: %s: %w", dir.Name, err)
 		}
 		entries = append(entries, e)
 	}
@@ -142,8 +147,13 @@ func (f *FS) WriteTar(w io.Writer, p string) error {
 	if err != nil {
 		return err
 	}
+	return f.WriteTarDir(w, dir)
+}
+
+// WriteTarDir is WriteTar for an already resolved directory entry.
+func (f *FS) WriteTarDir(w io.Writer, dir Entry) error {
 	if !dir.IsDir() {
-		return fmt.Errorf("%w: %s", ErrNotDir, Clean(p))
+		return fmt.Errorf("%w: %s", ErrNotDir, dir.Name)
 	}
 	return tarexport.Write(w, dir.Content, f.st.Get)
 }
@@ -156,7 +166,9 @@ func (f *FS) rootEntry() Entry { return Entry{Mode: store.TypeDir | 0o755, Conte
 // symlinks are followed in every component (an absolute target restarts at
 // the root, ".." pops and never rises above the root), more than
 // maxSymlinkHops links is ErrLoop, a missing component is ErrNotFound and
-// a non-directory with components left after it is ErrNotDir.
+// a non-directory with components left after it is ErrNotDir. A trailing
+// slash on a symlink target is ignored, as Clean ignores one on a request
+// path, where a kernel would insist on a directory.
 func (f *FS) resolve(p string) (Entry, error) {
 	p = Clean(p)
 	comps := splitPath(p)

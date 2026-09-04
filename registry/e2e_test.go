@@ -60,7 +60,7 @@ const e2eMaxInMemory = 1 << 20
 // are header-only.
 const (
 	e2eEntriesA = 6 // bin/app, etc/config.yaml, lib/libfoo.so, share/readme.txt, the PAX-named NOTICE, var/empty
-	e2eEntriesB = 4 // etc/hostname, etc/hosts, etc/os-release, .wh.var (a zero-length regular file)
+	e2eEntriesB = 5 // etc/hostname, etc/hosts, etc/os-release, etc/empty, .wh.var (both zero-length regular files)
 	e2eEntriesC = 3 // bin/app, etc/extra.conf, lib/libfoo.so
 )
 
@@ -403,7 +403,8 @@ func newE2EFixtures(t *testing.T) *e2eFixtures {
 		{name: "etc/hostname", data: []byte("e2e\n")},
 		{name: "etc/hosts", data: []byte("127.0.0.1 localhost\n")},
 		{name: "etc/os-release", data: []byte("ID=e2e\nVERSION_ID=1\n")},
-		{name: ".wh.var"}, // whiteout: removes layer A's var/ from the rootfs
+		{name: "etc/empty"}, // a zero-length file
+		{name: ".wh.var"},   // whiteout: removes layer A's var/ from the rootfs
 	})
 	fx.layerB = fx.tarB
 
@@ -1714,7 +1715,7 @@ func (e *e2eEnv) checkRootfs() {
 	}
 	walk("", root)
 	longDir := "share/doc/" + strings.TrimSuffix(strings.Repeat("a-rather-long-directory-name/", 5), "/")
-	want := []string{"bin", "bin/app", "bin/app-link", "etc", "etc/config.yaml", "etc/hostname", "etc/hosts", "etc/os-release",
+	want := []string{"bin", "bin/app", "bin/app-link", "etc", "etc/config.yaml", "etc/empty", "etc/hostname", "etc/hosts", "etc/os-release",
 		"lib", "lib/libfoo.so", "lib/libfoo.so.1", "share", "share/readme.txt", "share/doc"}
 	parts := strings.Split(longDir, "/")
 	for i := 3; i <= len(parts); i++ {
@@ -1825,7 +1826,7 @@ func (e *e2eEnv) fsAPI() {
 	resp, body = get(fsURL(m1, "etc"), nil)
 	c.expect(resp, body, http.StatusOK)
 	etc := e2eListing(t, body)
-	if etc.Path != "etc" || !slices.Equal(e2eNames(etc), []string{"config.yaml", "hostname", "hosts", "os-release"}) {
+	if etc.Path != "etc" || !slices.Equal(e2eNames(etc), []string{"config.yaml", "empty", "hostname", "hosts", "os-release"}) {
 		t.Fatalf("etc listing = %+v", etc)
 	}
 	for _, en := range etc.Entries {
@@ -1833,8 +1834,8 @@ func (e *e2eEnv) fsAPI() {
 			t.Fatalf("etc entry %+v", en)
 		}
 	}
-	if *etc.Entries[1].Size != int64(len("e2e\n")) {
-		t.Fatalf("hostname size = %d", *etc.Entries[1].Size)
+	if *etc.Entries[2].Size != int64(len("e2e\n")) || *etc.Entries[1].Size != 0 {
+		t.Fatalf("hostname size = %d, empty size = %d", *etc.Entries[2].Size, *etc.Entries[1].Size)
 	}
 	var paged []e2eFSEntry
 	pages := 0
@@ -1849,7 +1850,7 @@ func (e *e2eEnv) fsAPI() {
 		pages++
 		next = c.nextLink(resp)
 	}
-	if pages != 2 || !slices.Equal(e2eNames(e2eFSListing{Entries: paged}), e2eNames(etc)) {
+	if pages != 3 || !slices.Equal(e2eNames(e2eFSListing{Entries: paged}), e2eNames(etc)) {
 		t.Fatalf("paged listing (%d pages) = %+v", pages, paged)
 	}
 	resp, body = get(fsURL(m1, "etc")+"?n=0", nil)
@@ -1899,13 +1900,39 @@ func (e *e2eEnv) fsAPI() {
 	if len(body) != 0 {
 		t.Fatalf("HEAD returned %d body bytes", len(body))
 	}
+	resp, body = get(fsURL(m1, "bin/app"), map[string]string{"If-None-Match": "*"})
+	c.expect(resp, body, http.StatusNotModified)
+	resp, body = get(fsURL(m1, "etc/hosts")+"?format=json", nil)
+	c.expect(resp, body, http.StatusOK)
+	if string(body) != "127.0.0.1 localhost\n" {
+		t.Fatalf("format=json on a file = %q", body)
+	}
+	// An empty file: a 200 with no bytes, and no range can be satisfied.
+	resp, body = get(fsURL(m1, "etc/empty"), nil)
+	c.expect(resp, body, http.StatusOK)
+	c.expectLength(resp, 0)
+	if len(body) != 0 || resp.Header.Get("ETag") == "" {
+		t.Fatalf("empty file: %d bytes, ETag %q", len(body), resp.Header.Get("ETag"))
+	}
+	resp, body = get(fsURL(m1, "etc/empty"), map[string]string{"Range": "bytes=0-"})
+	c.expect(resp, body, http.StatusRequestedRangeNotSatisfiable)
+	c.expectHeader(resp, "Content-Range", "bytes */0")
+	resp, body = c.do(http.MethodHead, fsURL(m1, "etc"), nil, nil)
+	c.expect(resp, body, http.StatusOK)
+	c.expectHeader(resp, "Content-Type", "application/json")
+	if len(body) != 0 {
+		t.Fatalf("HEAD on a listing returned %d body bytes", len(body))
+	}
+	if resp.Header.Get("Docker-Distribution-API-Version") != "" {
+		t.Fatal("the distribution API version header is set on a /fs/ response")
+	}
 
 	// Directories as tars: etc alone, then the whole rootfs.
 	resp, body = get(fsURL(m1, "etc")+"?format=tar", nil)
 	c.expect(resp, body, http.StatusOK)
 	c.expectHeader(resp, "Content-Type", "application/x-tar")
 	tarred := e2eReadTar(t, body)
-	wantEtc := map[string]string{"config.yaml": "listen: :8080\nworkers: 4\n", "hostname": "e2e\n", "hosts": "127.0.0.1 localhost\n", "os-release": "ID=e2e\nVERSION_ID=1\n"}
+	wantEtc := map[string]string{"config.yaml": "listen: :8080\nworkers: 4\n", "empty": "", "hostname": "e2e\n", "hosts": "127.0.0.1 localhost\n", "os-release": "ID=e2e\nVERSION_ID=1\n"}
 	if len(tarred) != len(wantEtc) {
 		t.Fatalf("etc tar has %d entries: %v", len(tarred), tarred)
 	}

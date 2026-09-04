@@ -72,11 +72,6 @@ func (s *server) handleFS(w http.ResponseWriter, r *http.Request, rest string) {
 		return
 	}
 	q := r.URL.Query()
-	format := q.Get("format")
-	if format != "" && format != "json" && format != "tar" {
-		writeError(w, oci.NewError(oci.CodePathInvalid, "unknown format %q: use json or tar", format))
-		return
-	}
 	im, err := s.openRootfsImage(r, rt.repo, rt.reference, q.Get("platform"))
 	if err != nil {
 		s.handleError(w, r, err)
@@ -93,18 +88,26 @@ func (s *server) handleFS(w http.ResponseWriter, r *http.Request, rest string) {
 		s.fsError(w, r, p, err)
 		return
 	}
+	format := q.Get("format")
 	switch {
+	case format != "" && format != "json" && format != "tar":
+		writeError(w, oci.NewError(oci.CodePathInvalid, "unknown format %q: use json or tar", format))
 	case ent.IsDir():
 		if format == "tar" {
-			s.serveTar(w, r, fs, p)
+			s.serveTar(w, r, fs, p, ent)
 		} else {
-			s.serveListing(w, r, fs, p)
+			s.serveListing(w, r, fs, p, ent)
 		}
 	case format == "tar":
 		writeError(w, oci.NewError(oci.CodePathInvalid, "%s is not a directory; format=tar applies to directories", displayPath(p)))
 	case ent.IsRegular():
 		s.serveFile(w, r, fs, p, ent)
 	default:
+		if r.Method == http.MethodHead {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			return
+		}
 		writeJSON(w, http.StatusOK, fsEntryJSON(ent))
 	}
 }
@@ -126,7 +129,9 @@ func (s *server) openRootfsImage(r *http.Request, repo, reference, platform stri
 	}
 	idx, err := oci.ParseManifest(body.Bytes())
 	if err != nil {
-		return nil, fmt.Errorf("registry: stored index %s: %w", im.Meta.Digest, err)
+		// Not wrapped: a stored index the parser rejects is a server-side
+		// fault, not the client's MANIFEST_INVALID.
+		return nil, fmt.Errorf("registry: stored index %s: %v", im.Meta.Digest, err)
 	}
 	available := []string{}
 	for _, d := range idx.Manifests {
@@ -151,6 +156,9 @@ func (s *server) openRootfsImage(r *http.Request, repo, reference, platform stri
 			continue
 		}
 		child, err := s.images.Open(repo, d.Digest.String())
+		if errors.Is(err, image.ErrNotFound) {
+			return nil, unknown("platform %s names %s, which is no longer stored", platform, d.Digest)
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -233,17 +241,23 @@ func fsEntryJSON(e rootfs.Entry) fsEntry {
 }
 
 // serveListing answers a directory with its entries, paginated with n and
-// last like tags/list; the Link header keeps the other query parameters.
-func (s *server) serveListing(w http.ResponseWriter, r *http.Request, fs *rootfs.FS, p string) {
+// last like tags/list; the Link header keeps the other query parameters. A
+// HEAD sends the content type alone rather than listing for nothing.
+func (s *server) serveListing(w http.ResponseWriter, r *http.Request, fs *rootfs.FS, p string, dir rootfs.Entry) {
 	n, err := pageSize(r)
 	if err != nil {
 		invalidPageSize(w, err)
 		return
 	}
+	if r.Method == http.MethodHead {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		return
+	}
 	var entries []rootfs.Entry
 	more := false
 	if n != 0 {
-		entries, more, err = fs.List(p, r.URL.Query().Get("last"), n)
+		entries, more, err = fs.ListDir(dir, r.URL.Query().Get("last"), n)
 		if err != nil {
 			s.fsError(w, r, p, err)
 			return
@@ -358,7 +372,7 @@ func copyFileRange(w io.Writer, rd interface {
 
 // serveTar streams a directory as a PAX tar. The body has no
 // Content-Length; a failure after the first byte aborts the connection.
-func (s *server) serveTar(w http.ResponseWriter, r *http.Request, fs *rootfs.FS, p string) {
+func (s *server) serveTar(w http.ResponseWriter, r *http.Request, fs *rootfs.FS, p string, dir rootfs.Entry) {
 	h := w.Header()
 	h.Set("Content-Type", mediaTypeTar)
 	if r.Method == http.MethodHead {
@@ -366,7 +380,7 @@ func (s *server) serveTar(w http.ResponseWriter, r *http.Request, fs *rootfs.FS,
 		return
 	}
 	bw := &bodyWriter{w: w, status: http.StatusOK}
-	err := fs.WriteTar(bw, p)
+	err := fs.WriteTarDir(bw, dir)
 	if err == nil {
 		bw.finish()
 		return
