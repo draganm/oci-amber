@@ -39,8 +39,8 @@ github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c
 github.com/davecgh/go-spew v1.1.1/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
 github.com/draganm/tar-prism v0.1.2-0.20260903193749-d658ce95e35f h1:SE82sqWZKf7vEjNBe3oVow51daNdrdHiXp49n8LneGk=
 github.com/draganm/tar-prism v0.1.2-0.20260903193749-d658ce95e35f/go.mod h1:I5PbjGNJBAYeIcvagg1J52hu3mcJG5e4d1FHhtYjkS4=
-github.com/draganm/zrecipe v0.3.0 h1:9imcswK4LFVLBTUjIAh2uguIAoH7DOkQIqG6+ept/9w=
-github.com/draganm/zrecipe v0.3.0/go.mod h1:6wgxr7EzkHZa2l1EOOkRj2v+YN+98OE4kmPwVXKVMMk=
+github.com/draganm/zrecipe v0.4.0 h1:Uvsm7jvl6d4ONYoqyx6yYgS3u2su/Q/nJnNhpterFuU=
+github.com/draganm/zrecipe v0.4.0/go.mod h1:6wgxr7EzkHZa2l1EOOkRj2v+YN+98OE4kmPwVXKVMMk=
 github.com/fxamacker/cbor/v2 v2.9.2 h1:X4Ksno9+x3cz0TZv69ec1hxP/+tymuR8PXQJyDwfh78=
 github.com/fxamacker/cbor/v2 v2.9.2/go.mod h1:vM4b+DJCtHn+zz7h3FFp/hDAI9WNWCsZj23V5ytsSxQ=
 github.com/getsentry/sentry-go v0.27.0 h1:Pv98CIbtB3LkMWmXi4Joa5OOcwbmnX88sF5qbK3r3Ps=
