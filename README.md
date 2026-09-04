@@ -25,8 +25,8 @@ Every pushed container image also gets a root filesystem view: the layers
 applied in order with OCI whiteout semantics, stored in the image root as
 an amber directory tree whose regular files point at the content the layers
 already hold. Building it replays tar headers from the stored recipes and
-reads at most a block of file content. It is the substrate for browsing an
-image and serving parts of it without rebuilding a layer.
+reads at most a block of file content. The `/fs/` API serves it: directory
+listings as JSON, files with ranges, directories as tars.
 
 ## Requirements
 
@@ -159,6 +159,65 @@ regardless of what the client had.
 Manifests are capped at 4 MiB (`413`). Blob uploads are not size limited.
 Range requests on prism-stored layers are answered with the full body.
 
+## Rootfs API
+
+The root filesystem view of a container image is served under `/fs/`,
+outside the distribution API:
+
+```
+GET /fs/<repo>:<tag>/<path>
+GET /fs/<repo>@<digest>/<path>
+```
+
+The first path segment holding `@` or `:` ends the image reference (a
+repository name can contain neither), everything after it is a path inside
+the rootfs, cleaned with URL semantics so `..` never leaves the root.
+Symlinks are followed in every component, the last one included, with
+absolute targets rooted at the rootfs and a 40-hop bound, so `bin/ls` works
+on a usrmerge image. `HEAD` returns the same headers as `GET` without a
+body; other methods are `405`.
+
+| Resolved entry | Query | Answer |
+|---|---|---|
+| directory | none | `200 application/json` listing, `n`/`last` pagination with a `Link` header like `tags/list` |
+| directory | `format=tar` | `200 application/x-tar`, a streamed PAX tar of the subtree with names relative to the directory (like `tar -C dir .`); the root gives the whole rootfs |
+| regular file | none | `200 application/octet-stream` with `Content-Length`, `Accept-Ranges: bytes`, a single `Range` honoured with `206`, `ETag` from the content key and `If-None-Match` answering `304` |
+| regular file | `format=tar` | `400 PATH_INVALID` |
+| device, fifo, socket | none | `200 application/json`, the entry object alone |
+
+A listing:
+
+```json
+{"path": "etc",
+ "entries": [
+  {"name": "passwd", "type": "file", "mode": "0644", "uid": 0, "gid": 0, "mtime": "2026-09-03T18:00:00Z", "size": 1234},
+  {"name": "rc.d", "type": "dir", "mode": "0755", "uid": 0, "gid": 0, "mtime": "2026-09-03T18:00:00Z"},
+  {"name": "mtab", "type": "symlink", "mode": "0777", "uid": 0, "gid": 0, "mtime": "2026-09-03T18:00:00Z", "target": "/proc/mounts"},
+  {"name": "null", "type": "char", "mode": "0666", "uid": 0, "gid": 0, "mtime": "2026-09-03T18:00:00Z", "major": 1, "minor": 3}]}
+```
+
+`type` is `file`, `dir`, `symlink`, `char`, `block`, `fifo` or `socket`;
+`mode` is the permission, setuid, setgid and sticky bits in octal; `size`
+appears on files, `target` on symlinks, `major` and `minor` on devices.
+Entries are in name order.
+
+A reference that resolves to an index needs `?platform=<os>/<arch>[/<variant>]`
+to pick the child manifest; without it, or with no match, the answer is
+`400 PLATFORM_UNKNOWN` whose `detail` lists the children's platforms. An
+image without a view (a raw layer, an artifact, a root stored before views
+existed) is `404 ROOTFS_UNAVAILABLE` with the status and reason in
+`detail`. A missing path is `404 PATH_UNKNOWN`; a symlink loop, a bad
+`format` or `format=tar` on a file is `400 PATH_INVALID`. These four codes
+are oci-amber extensions rendered in the standard error envelope.
+
+```sh
+curl -s http://127.0.0.1:5000/fs/library/app:v1/etc | jq .
+curl -s http://127.0.0.1:5000/fs/library/app:v1/etc/os-release
+curl -s -r 0-1023 http://127.0.0.1:5000/fs/library/app:v1/usr/bin/app -o head.bin
+curl -s 'http://127.0.0.1:5000/fs/library/app:v1/usr/share?format=tar' | tar -tv
+curl -s 'http://127.0.0.1:5000/fs/library/app:latest/etc?platform=linux/arm64' | jq .
+```
+
 ## Logging
 
 Logs are `log/slog` text lines on stderr; `--log-level` selects the
@@ -244,7 +303,10 @@ removes one.
   cannot faithfully place: sparse files, paths escaping the root, hard links
   without a target, unknown entry types. A raw layer or a hard link carrying
   a payload (which `archive/tar` cannot parse) leaves the image without a
-  view. Nothing serves `rootfs/` over HTTP yet.
+  view.
+- The rootfs API is read-only, unauthenticated like the rest, lists no
+  extended attributes (the tar carries them) and does not sniff content
+  types.
 - A layer that zrecipe accepts but cannot rebuild is stored raw with
   `raw_reason=roundtrip-failed`; bytes are never lost because the round-trip
   check runs before publishing. zrecipe v0.1.0 did this for layers gzipped at
