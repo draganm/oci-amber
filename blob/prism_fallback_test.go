@@ -10,6 +10,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -232,6 +233,46 @@ func TestRoundTripCheckObeysVerifyOption(t *testing.T) {
 	got, _ := pullPrism(t, off, oci.DigestOfBytes(data))
 	if !bytes.Equal(got, data) {
 		t.Fatal("pulled bytes differ with VerifyRoundTrip off")
+	}
+}
+
+// TestRoundTripCheckUsesStoredCompParams covers I5: finalizePrism must feed
+// the round-trip check the params it reads back from the stored comp.json,
+// not the *Params pass one built in memory, so the check exercises exactly
+// the bytes a real pull will use. Injecting a divergence between the two is
+// impractical (finalizePrism only ever writes what pass one produced), so
+// this instead captures what the hook receives and compares it against an
+// independent ReadParams decode of the comp.json that Put actually left in
+// the store.
+func TestRoundTripCheckUsesStoredCompParams(t *testing.T) {
+	var got *compprysm.Params
+	orig := roundTripCheck
+	roundTripCheck = func(ctx context.Context, b *Store, src *amberSource, params *compprysm.Params, want oci.Digest) error {
+		got = params
+		return orig(ctx, b, src, params, want)
+	}
+	t.Cleanup(func() { roundTripCheck = orig })
+
+	b, st, _ := newTestStore(t, Options{VerifyRoundTrip: true})
+	data := gzipBytes(t, prismTar(t, prismSmallFiles(t)), gzip.DefaultCompression)
+	meta := putPrism(t, b, data)
+	if meta.Kind != KindPrism {
+		t.Fatalf("kind = %q (reason %q), want prism", meta.Kind, meta.RawReason)
+	}
+	if got == nil {
+		t.Fatal("roundTripCheck was never invoked")
+	}
+
+	root, err := st.Resolve(RefName(meta.Digest))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := b.readParams(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("roundTripCheck received %+v, want the stored comp.json decoded: %+v", got, want)
 	}
 }
 

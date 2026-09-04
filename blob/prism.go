@@ -356,8 +356,15 @@ func (b *Store) finalizePrism(ctx context.Context, sp *upload.Spool, params *com
 		return prismResult{}, store.Stats{}, err
 	}
 	if b.opts.VerifyRoundTrip {
+		// Read comp.json back from the store rather than reusing the
+		// in-memory params pass one produced: the check must exercise
+		// exactly the bytes a real pull will read (spec I5).
+		storedParams, err := b.readCompParams(res.comp)
+		if err != nil {
+			return prismResult{}, store.Stats{}, fmt.Errorf("blob: reading back %s for round-trip check: %w", CompFile, err)
+		}
 		src := &amberSource{st: b.st, recipe: res.recipe, index: res.index, blobs: res.blobs}
-		if err := roundTripCheck(ctx, b, src, params, d); err != nil {
+		if err := roundTripCheck(ctx, b, src, storedParams, d); err != nil {
 			if cerr := ctx.Err(); cerr != nil {
 				return prismResult{}, store.Stats{}, cerr
 			}
@@ -441,6 +448,15 @@ func (b *Store) readParams(root key.Key) (*compprysm.Params, error) {
 	if err != nil {
 		return nil, fmt.Errorf("blob: %s: %w", CompFile, err)
 	}
+	return b.readCompParams(k)
+}
+
+// readCompParams reads and decodes a comp.json object already stored under
+// key k, the same way a pull does. finalizePrism uses it directly (k is
+// res.comp, not yet under a root) so the round-trip check exercises exactly
+// the bytes a real pull will read instead of the in-memory params pass one
+// produced.
+func (b *Store) readCompParams(k key.Key) (*compprysm.Params, error) {
 	data, err := b.st.ReadFile(k)
 	if err != nil {
 		return nil, fmt.Errorf("blob: reading %s: %w", CompFile, err)
