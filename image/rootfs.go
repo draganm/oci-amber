@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/jobs-build/amber-store-core/key"
 
@@ -30,9 +31,10 @@ func rootfsApplies(m *oci.Manifest) bool {
 // buildRootfs produces the rootfs field of the manifest m being pushed to
 // repo and, for ok and partial, the key of its rootfs/ directory, writing
 // new objects through w. A root of the same digest already in repo lends
-// its field and key. A raw layer or one whose archive cannot be parsed
-// makes the field unavailable; nothing is written then. Any other failure
-// is returned.
+// its tree when it has one. A raw layer or one whose archive cannot be
+// parsed makes the field unavailable; nothing is written then. A layer
+// whose blob vanished since the manifest was validated is
+// CodeManifestBlobUnknown; any other failure is returned as is.
 func (s *Store) buildRootfs(ctx context.Context, w *store.Writer, repo string, digest oci.Digest, m *oci.Manifest) (*Rootfs, key.Key, error) {
 	if !rootfsApplies(m) {
 		return &Rootfs{Status: RootfsNotApplicable}, key.Key{}, nil
@@ -42,9 +44,13 @@ func (s *Store) buildRootfs(ctx context.Context, w *store.Writer, repo string, d
 	} else if ok {
 		return info, k, nil
 	}
+	start := time.Now()
 	b := rootfs.New()
 	for _, d := range m.Layers {
 		bl, err := s.blobs.Open(d.Digest)
+		if errors.Is(err, blob.ErrNotFound) {
+			return nil, key.Key{}, blobUnknown(d.Digest)
+		}
 		if err != nil {
 			return nil, key.Key{}, fmt.Errorf("image: opening layer %s: %w", d.Digest, err)
 		}
@@ -72,13 +78,17 @@ func (s *Store) buildRootfs(ctx context.Context, w *store.Writer, repo string, d
 	if res.SkippedCount > 0 {
 		info.Status, info.Skipped, info.SkippedCount = RootfsPartial, res.Skipped, res.SkippedCount
 	}
+	s.log.Debug("rootfs built", "repo", repo, "digest", string(digest), "layers", len(m.Layers),
+		"entries", res.Entries, "skipped", res.SkippedCount, "duration", time.Since(start))
 	return info, res.Root, nil
 }
 
 // reuseRootfs returns the rootfs field and key of the root that
-// oci/manifest/<repo>/<digest> already points at, when that root carries a
-// rootfs field. The same digest has the same layers, so nothing needs to
-// be rebuilt on a re-push.
+// oci/manifest/<repo>/<digest> already points at, when that root holds a
+// tree (status ok or partial). The same digest has the same layers, so
+// nothing needs to be rebuilt on a re-push. An unavailable rootfs is not
+// reused: a layer stored raw at the time may have been deleted and pushed
+// again as a prism since.
 func (s *Store) reuseRootfs(repo string, digest oci.Digest) (*Rootfs, key.Key, bool, error) {
 	name := ManifestRef(repo, digest)
 	root, err := s.st.Resolve(name)
@@ -92,14 +102,12 @@ func (s *Store) reuseRootfs(repo string, digest oci.Digest) (*Rootfs, key.Key, b
 	if err != nil {
 		return nil, key.Key{}, false, err
 	}
-	if meta.Rootfs == nil {
+	if meta.Rootfs == nil || (meta.Rootfs.Status != RootfsOK && meta.Rootfs.Status != RootfsPartial) {
 		return nil, key.Key{}, false, nil
 	}
-	var k key.Key
-	if meta.Rootfs.Status == RootfsOK || meta.Rootfs.Status == RootfsPartial {
-		if k, err = s.st.LookupKey(root, RootfsDir); err != nil {
-			return nil, key.Key{}, false, fmt.Errorf("image: %s in root %s: %w", RootfsDir, root, err)
-		}
+	k, err := s.st.LookupKey(root, RootfsDir)
+	if err != nil {
+		return nil, key.Key{}, false, fmt.Errorf("image: %s in root %s: %w", RootfsDir, root, err)
 	}
 	return meta.Rootfs, k, true, nil
 }

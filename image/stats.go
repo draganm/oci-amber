@@ -22,7 +22,7 @@ import (
 //     logical = deduped = size, disk = 0.
 //   - Each unique index child: its stored meta.json stats.
 //   - manifestObjects, the Writer stats of the manifest's own objects
-//     (manifest bytes, blobs/, manifests/), are added.
+//     (manifest bytes, blobs/, manifests/ and the rootfs/ tree), are added.
 //
 // Child roots are resolved through oci/manifest/<repo>/<digest>; a missing
 // child is CodeManifestBlobUnknown.

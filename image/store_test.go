@@ -53,7 +53,7 @@ type env struct {
 func newEnv(t *testing.T) *env {
 	t.Helper()
 	logs := &syncBuffer{}
-	log := slog.New(slog.NewTextHandler(logs, nil))
+	log := slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	st, err := store.Open(filepath.Join(t.TempDir(), "store"), store.Options{Logger: log})
 	if err != nil {
 		t.Fatal(err)

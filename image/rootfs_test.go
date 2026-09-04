@@ -333,6 +333,20 @@ func TestPutRootfsReuseAndDeterminism(t *testing.T) {
 	if k, _ := mustOpen(t, e, "library/app", "v2").Rootfs(); k != firstKey {
 		t.Fatal("re-push changed the rootfs key")
 	}
+	if n := strings.Count(e.logs.String(), `msg="rootfs built"`); n != 1 {
+		t.Fatalf("rootfs built %d times for two pushes of one digest, want 1:\n%s", n, e.logs.String())
+	}
+
+	// An unavailable rootfs is not reused: the raw layer may be a prism by
+	// the next push.
+	raw, _ := e.layerBlob(2048)
+	unavailable := e.put("library/app", "raw", oci.MediaTypeOCIManifest, manifestBody(t, imageManifest(cfg, raw)))
+	if unavailable.Rootfs.Status != RootfsUnavailable {
+		t.Fatalf("Rootfs = %+v", unavailable.Rootfs)
+	}
+	if _, _, ok, err := e.images.reuseRootfs("library/app", unavailable.Digest); err != nil || ok {
+		t.Fatalf("reuseRootfs of an unavailable rootfs = %v, %v; want false", ok, err)
+	}
 
 	// The same image in another repository is rebuilt to the same key.
 	other := e.put("library/other", "v1", oci.MediaTypeOCIManifest, body)
