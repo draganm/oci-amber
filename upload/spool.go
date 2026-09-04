@@ -25,15 +25,17 @@ type ReaderAtSeeker interface {
 
 var errSpoolRemoved = errors.New("upload: spool removed")
 
-// Spool is a snapshot of an upload's bytes, backed either by a byte slice or
-// by a file under the manager's directory. Its size and digest are fixed
-// when the snapshot is taken; bytes appended to the session afterwards are
-// not visible through it.
+// Spool is a snapshot of an upload's bytes, backed by a byte slice, by a
+// file under the manager's directory, or by a window of a caller-owned
+// io.ReaderAt. Its size and digest are fixed when the snapshot is taken;
+// bytes appended to the session afterwards are not visible through it.
 type Spool struct {
 	size    int64
 	digest  oci.Digest
 	mem     []byte
 	path    string
+	ra      io.ReaderAt // section spool: the source, read at off
+	off     int64
 	touch   func()
 	removed bool
 }
@@ -41,6 +43,17 @@ type Spool struct {
 // NewMemorySpool returns a Spool over data. The slice is not copied.
 func NewMemorySpool(data []byte) *Spool {
 	return &Spool{size: int64(len(data)), digest: oci.DigestOfBytes(data), mem: data}
+}
+
+// NewSectionSpool returns a Spool over the size bytes of r that start at
+// off, vouched for by d: the caller has verified, or will verify before
+// the blob is stored, that they hash to d. Nothing is copied; Open returns
+// an io.SectionReader over that window, so r must stay usable for as long
+// as the spool is, and may be shared by several spools (io.ReaderAt is
+// safe for concurrent use). Remove marks the spool removed and leaves r
+// alone, since the source is the caller's, an archive typically.
+func NewSectionSpool(r io.ReaderAt, off, size int64, d oci.Digest) *Spool {
+	return &Spool{size: size, digest: d, ra: r, off: off}
 }
 
 // Size is the number of bytes in the spool.
@@ -69,6 +82,9 @@ func (sp *Spool) Open() (ReaderAtSeeker, error) {
 	if sp.touch != nil {
 		sp.touch()
 	}
+	if sp.ra != nil {
+		return io.NewSectionReader(sp.ra, sp.off, sp.size), nil
+	}
 	if sp.path == "" {
 		return bytes.NewReader(sp.mem), nil
 	}
@@ -93,6 +109,7 @@ func (sp *Spool) Open() (ReaderAtSeeker, error) {
 func (sp *Spool) Remove() error {
 	sp.removed = true
 	sp.mem = nil
+	sp.ra = nil
 	if sp.path == "" {
 		return nil
 	}

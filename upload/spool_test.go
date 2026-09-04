@@ -189,3 +189,62 @@ func TestFileSpoolIsSnapshot(t *testing.T) {
 	}
 	checkSpoolReads(t, sp, first)
 }
+
+func TestSectionSpoolReadsOnlyItsWindow(t *testing.T) {
+	data := []byte("0123456789abcdef")
+	window := data[4:12]
+	sp := NewSectionSpool(bytes.NewReader(data), 4, int64(len(window)), oci.DigestOfBytes(window))
+	if sp.Size() != 8 {
+		t.Fatalf("Size = %d, want 8", sp.Size())
+	}
+	if sp.Digest() != oci.DigestOfBytes(window) {
+		t.Fatalf("Digest = %s", sp.Digest())
+	}
+	r, err := sp.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "456789ab" {
+		t.Fatalf("read %q, want %q", got, "456789ab")
+	}
+	buf := make([]byte, 3)
+	if _, err := r.ReadAt(buf, 5); err != nil {
+		t.Fatal(err)
+	}
+	if string(buf) != "9ab" {
+		t.Fatalf("ReadAt(5) = %q, want %q", buf, "9ab")
+	}
+	if _, err := r.Seek(0, io.SeekStart); err != nil {
+		t.Fatal(err)
+	}
+	again, _ := io.ReadAll(r)
+	if string(again) != "456789ab" {
+		t.Fatalf("after Seek read %q", again)
+	}
+}
+
+func TestSectionSpoolRemoveLeavesSourceAlone(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "archive.tar")
+	if err := os.WriteFile(path, []byte("hello world"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	sp := NewSectionSpool(f, 6, 5, oci.DigestOfBytes([]byte("world")))
+	if err := sp.Remove(); err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("Remove must not touch the source file: %v", err)
+	}
+	if _, err := sp.Open(); err == nil {
+		t.Fatal("Open after Remove must fail")
+	}
+}
