@@ -90,6 +90,10 @@ func parsePath(p string) (route, bool) {
 func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set(apiVersionHeader, apiVersionValue)
 	p := r.URL.Path
+	if rest, ok := strings.CutPrefix(p, fsPrefix); ok {
+		s.handleFS(w, r, rest)
+		return
+	}
 	if p == "/v2/" || p == "/v2" {
 		s.handleBase(w, r)
 		return

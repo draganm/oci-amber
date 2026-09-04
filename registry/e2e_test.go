@@ -84,6 +84,7 @@ func TestE2EPushPull(t *testing.T) {
 	e := newE2EEnv(t)
 	e.push()
 	e.checkRootfs()
+	e.fsAPI()
 	e.checkLogs()
 	e.storage()
 	e.pull()
@@ -1750,4 +1751,255 @@ func (e *e2eEnv) checkRootfs() {
 			t.Fatalf("image 1 push line: %v", rec)
 		}
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Phase 1c: the rootfs API
+
+// e2eFSEntry mirrors the listing entry the API renders.
+type e2eFSEntry struct {
+	Name   string  `json:"name"`
+	Type   string  `json:"type"`
+	Mode   string  `json:"mode"`
+	UID    uint64  `json:"uid"`
+	GID    uint64  `json:"gid"`
+	Mtime  string  `json:"mtime"`
+	Size   *int64  `json:"size"`
+	Target string  `json:"target"`
+	Major  *uint64 `json:"major"`
+	Minor  *uint64 `json:"minor"`
+}
+
+type e2eFSListing struct {
+	Path    string       `json:"path"`
+	Entries []e2eFSEntry `json:"entries"`
+}
+
+func e2eListing(t *testing.T, body []byte) e2eFSListing {
+	t.Helper()
+	var l e2eFSListing
+	if err := json.Unmarshal(body, &l); err != nil {
+		t.Fatalf("listing is not JSON: %v: %q", err, body)
+	}
+	if l.Entries == nil {
+		t.Fatalf("listing entries is null: %q", body)
+	}
+	return l
+}
+
+func e2eNames(l e2eFSListing) []string {
+	names := make([]string, 0, len(l.Entries))
+	for _, e := range l.Entries {
+		names = append(names, e.Name)
+	}
+	return names
+}
+
+// fsAPI walks image 1 over /fs/: listings with pagination, files with
+// ranges and ETags, symlinks followed, directories as tars, the index by
+// platform, and every error the API defines.
+func (e *e2eEnv) fsAPI() {
+	t, c, fx := e.t, e.c, e.fx
+	m1 := e2eApp + "@" + e.m1.String()
+	fsURL := func(ref, p string) string { return c.url("/fs/" + ref + "/" + p) }
+	get := func(target string, hdr map[string]string) (*http.Response, []byte) {
+		return c.do(http.MethodGet, target, nil, hdr)
+	}
+
+	// Root listing: layer A's directories, var/ whited out by layer B.
+	resp, body := get(fsURL(m1, ""), nil)
+	c.expect(resp, body, http.StatusOK)
+	c.expectHeader(resp, "Content-Type", "application/json")
+	root := e2eListing(t, body)
+	if root.Path != "" || !slices.Equal(e2eNames(root), []string{"bin", "etc", "lib", "share"}) {
+		t.Fatalf("root listing = %+v", root)
+	}
+	for _, en := range root.Entries {
+		if en.Type != "dir" || en.Mode != "0755" || en.Size != nil {
+			t.Fatalf("root entry %+v", en)
+		}
+	}
+
+	// etc: layer A's config.yaml and layer B's files; the same through
+	// pages of two followed by Link.
+	resp, body = get(fsURL(m1, "etc"), nil)
+	c.expect(resp, body, http.StatusOK)
+	etc := e2eListing(t, body)
+	if etc.Path != "etc" || !slices.Equal(e2eNames(etc), []string{"config.yaml", "hostname", "hosts", "os-release"}) {
+		t.Fatalf("etc listing = %+v", etc)
+	}
+	for _, en := range etc.Entries {
+		if en.Type != "file" || en.Mode != "0644" || en.Size == nil || en.Mtime != "2023-11-14T22:13:20Z" {
+			t.Fatalf("etc entry %+v", en)
+		}
+	}
+	if *etc.Entries[1].Size != int64(len("e2e\n")) {
+		t.Fatalf("hostname size = %d", *etc.Entries[1].Size)
+	}
+	var paged []e2eFSEntry
+	pages := 0
+	for next := fsURL(m1, "etc") + "?n=2"; next != ""; {
+		resp, body = get(next, nil)
+		c.expect(resp, body, http.StatusOK)
+		page := e2eListing(t, body)
+		if len(page.Entries) > 2 {
+			t.Fatalf("page of %d entries, want at most 2", len(page.Entries))
+		}
+		paged = append(paged, page.Entries...)
+		pages++
+		next = c.nextLink(resp)
+	}
+	if pages != 2 || !slices.Equal(e2eNames(e2eFSListing{Entries: paged}), e2eNames(etc)) {
+		t.Fatalf("paged listing (%d pages) = %+v", pages, paged)
+	}
+	resp, body = get(fsURL(m1, "etc")+"?n=0", nil)
+	c.expect(resp, body, http.StatusOK)
+	if l := e2eListing(t, body); len(l.Entries) != 0 || resp.Header.Get("Link") != "" {
+		t.Fatalf("n=0 listing = %+v, Link %q", l, resp.Header.Get("Link"))
+	}
+
+	// A file: whole, by range, conditionally, through a symlink and a hard link.
+	resp, body = get(fsURL(m1, "bin/app"), nil)
+	c.expect(resp, body, http.StatusOK)
+	c.expectHeader(resp, "Content-Type", "application/octet-stream")
+	c.expectHeader(resp, "Accept-Ranges", "bytes")
+	c.expectLength(resp, len(fx.big))
+	if !bytes.Equal(body, fx.big) {
+		t.Fatal("bin/app bytes differ from the fixture")
+	}
+	etag := resp.Header.Get("ETag")
+	if etag == "" {
+		t.Fatal("bin/app has no ETag")
+	}
+	resp, body = get(fsURL(m1, "bin/app"), map[string]string{"If-None-Match": etag})
+	c.expect(resp, body, http.StatusNotModified)
+	c.expectHeader(resp, "ETag", etag)
+	resp, body = get(fsURL(m1, "bin/app"), map[string]string{"Range": "bytes=1048576-1048600"})
+	c.expect(resp, body, http.StatusPartialContent)
+	c.expectHeader(resp, "Content-Range", fmt.Sprintf("bytes 1048576-1048600/%d", len(fx.big)))
+	if !bytes.Equal(body, fx.big[1048576:1048601]) {
+		t.Fatal("range bytes differ")
+	}
+	resp, body = get(fsURL(m1, "bin/app"), map[string]string{"Range": fmt.Sprintf("bytes=%d-", len(fx.big)+10)})
+	c.expect(resp, body, http.StatusRequestedRangeNotSatisfiable)
+	c.expectHeader(resp, "Content-Range", fmt.Sprintf("bytes */%d", len(fx.big)))
+	resp, body = get(fsURL(m1, "bin/app-link"), nil)
+	c.expect(resp, body, http.StatusOK)
+	if !bytes.Equal(body, fx.big) {
+		t.Fatal("bin/app-link did not follow the symlink to bin/app")
+	}
+	resp, body = get(fsURL(m1, "lib/libfoo.so.1"), nil)
+	c.expect(resp, body, http.StatusOK)
+	if !bytes.Equal(body, fx.lib) {
+		t.Fatal("lib/libfoo.so.1 differs from the fixture")
+	}
+	resp, body = c.do(http.MethodHead, fsURL(m1, "bin/app"), nil, nil)
+	c.expect(resp, body, http.StatusOK)
+	c.expectLength(resp, len(fx.big))
+	if len(body) != 0 {
+		t.Fatalf("HEAD returned %d body bytes", len(body))
+	}
+
+	// Directories as tars: etc alone, then the whole rootfs.
+	resp, body = get(fsURL(m1, "etc")+"?format=tar", nil)
+	c.expect(resp, body, http.StatusOK)
+	c.expectHeader(resp, "Content-Type", "application/x-tar")
+	tarred := e2eReadTar(t, body)
+	wantEtc := map[string]string{"config.yaml": "listen: :8080\nworkers: 4\n", "hostname": "e2e\n", "hosts": "127.0.0.1 localhost\n", "os-release": "ID=e2e\nVERSION_ID=1\n"}
+	if len(tarred) != len(wantEtc) {
+		t.Fatalf("etc tar has %d entries: %v", len(tarred), tarred)
+	}
+	for name, data := range wantEtc {
+		if tarred[name] != data {
+			t.Fatalf("etc tar %s = %q, want %q", name, tarred[name], data)
+		}
+	}
+	resp, body = get(fsURL(m1, "")+"?format=tar", nil)
+	c.expect(resp, body, http.StatusOK)
+	whole := e2eReadTar(t, body)
+	if whole["bin/app"] != string(fx.big) || whole["etc/hosts"] != wantEtc["hosts"] {
+		t.Fatalf("whole rootfs tar has %d entries", len(whole))
+	}
+	if _, has := whole["var/empty"]; has {
+		t.Fatal("whole rootfs tar contains the whited-out var/empty")
+	}
+	resp, body = c.do(http.MethodHead, fsURL(m1, "etc")+"?format=tar", nil, nil)
+	c.expect(resp, body, http.StatusOK)
+	c.expectHeader(resp, "Content-Type", "application/x-tar")
+
+	// The index by tag: a platform picks the child.
+	idx := e2eApp + ":latest"
+	resp, body = get(fsURL(idx, "etc"), nil)
+	oe := c.expectError(resp, body, http.StatusBadRequest, oci.CodePlatformUnknown)
+	if detail, ok := oe.Detail.(map[string]any); !ok || fmt.Sprint(detail["platforms"]) != "[linux/amd64 linux/arm64]" {
+		t.Fatalf("PLATFORM_UNKNOWN detail = %v", oe.Detail)
+	}
+	resp, body = get(fsURL(idx, "etc/extra.conf")+"?platform=linux/arm64", nil)
+	c.expect(resp, body, http.StatusOK)
+	if string(body) != "extra = true\n" {
+		t.Fatalf("index/arm64 etc/extra.conf = %q", body)
+	}
+	resp, body = get(fsURL(idx, "etc/hostname")+"?platform=linux/amd64", nil)
+	c.expect(resp, body, http.StatusOK)
+	if string(body) != "e2e\n" {
+		t.Fatalf("index/amd64 etc/hostname = %q", body)
+	}
+	resp, body = get(fsURL(idx, "etc")+"?platform=linux/s390x", nil)
+	c.expectError(resp, body, http.StatusBadRequest, oci.CodePlatformUnknown)
+	resp, body = get(fsURL(idx, "etc")+"?platform=linux", nil)
+	c.expectError(resp, body, http.StatusBadRequest, oci.CodePlatformUnknown)
+	resp, body = get(fsURL(idx, "etc")+"?platform=linux/arm64&n=1", nil)
+	c.expect(resp, body, http.StatusOK)
+	if next := c.nextLink(resp); !strings.Contains(next, "platform=linux%2Farm64") || !strings.Contains(next, "last=config.yaml") {
+		t.Fatalf("Link on an index listing = %q", next)
+	}
+
+	// Errors.
+	resp, body = get(fsURL(e2eApp+"@"+e.art.String(), ""), nil)
+	oe = c.expectError(resp, body, http.StatusNotFound, oci.CodeRootfsUnavailable)
+	if detail, ok := oe.Detail.(map[string]any); !ok || detail["status"] != "not-applicable" {
+		t.Fatalf("ROOTFS_UNAVAILABLE detail = %v", oe.Detail)
+	}
+	resp, body = get(fsURL(m1, "nope/x"), nil)
+	c.expectError(resp, body, http.StatusNotFound, oci.CodePathUnknown)
+	resp, body = get(fsURL(m1, "etc/hosts/x"), nil)
+	c.expectError(resp, body, http.StatusNotFound, oci.CodePathUnknown)
+	resp, body = get(fsURL(m1, "etc/hosts")+"?format=tar", nil)
+	c.expectError(resp, body, http.StatusBadRequest, oci.CodePathInvalid)
+	resp, body = get(fsURL(m1, "etc")+"?format=zip", nil)
+	c.expectError(resp, body, http.StatusBadRequest, oci.CodePathInvalid)
+	resp, body = get(fsURL(m1, "etc")+"?n=-1", nil)
+	c.expect(resp, body, http.StatusBadRequest)
+	resp, body = get(fsURL(e2eApp+":no-such-tag", ""), nil)
+	c.expectError(resp, body, http.StatusNotFound, oci.CodeManifestUnknown)
+	resp, body = get(fsURL("Bad_Name:v1", ""), nil)
+	c.expectError(resp, body, http.StatusBadRequest, oci.CodeNameInvalid)
+	resp, body = get(c.url("/fs/library/app/etc"), nil)
+	c.expectEmptyErrors(resp, body, http.StatusNotFound)
+	resp, body = c.do(http.MethodPost, fsURL(m1, "etc"), nil, nil)
+	c.expectError(resp, body, http.StatusMethodNotAllowed, oci.CodeUnsupported)
+	c.expectHeader(resp, "Allow", "GET, HEAD")
+}
+
+// e2eReadTar reads a tar body into name -> content, directory names without
+// their trailing slash.
+func e2eReadTar(t *testing.T, body []byte) map[string]string {
+	t.Helper()
+	out := map[string]string{}
+	tr := tar.NewReader(bytes.NewReader(body))
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatalf("tar: %v", err)
+		}
+		data, err := io.ReadAll(tr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		out[strings.TrimSuffix(hdr.Name, "/")] = string(data)
+	}
+	return out
 }
