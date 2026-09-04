@@ -539,7 +539,7 @@ variables through urfave/cli):
 | Flag | Default | Meaning |
 |---|---|---|
 | `--store` | required | store directory |
-| `--work-dir` | `<store>/work` | spilled uploads and comp-prysm spool |
+| `--work-dir` | `<store>/work` | registry state lives under `<work-dir>/oci-amber/{uploads,spool}`; only those two directories are emptied at startup |
 | `--listen` | `:5000` | listen address |
 | `--max-in-memory` | `64MiB` | upload spool and comp-prysm spool threshold |
 | `--analyze-parallelism` | `2` | comp-prysm candidate workers per blob |
@@ -602,7 +602,7 @@ and source; oci-amber then requires that version.
 
 | Situation | Outcome |
 |---|---|
-| comp-prysm `ErrNotReproducible`, `ErrUnsupported`, `ErrCorrupt`, non-tar `none`, analyze deadline | stored raw, reason recorded, `201` |
+| comp-prysm `ErrNotReproducible`, `ErrUnsupported`, `ErrCorrupt`, non-tar `none` or compressed non-tar (first decompressed block), zstd frame window above 128 MiB (`unsupported`), analyze deadline | stored raw, reason recorded, `201` |
 | second-pass digest mismatch, tar-prism decompose error, round-trip failure | stored raw, reason recorded, error-level log for the last two, `201`. A compressed blob that is not a tar never reaches this row: step 5 classifies it `not-tar` before the engine search, so the error level is reserved for archives that really did look decomposable |
 | amber write error, I/O error on the spool, request context cancelled during finalize | `500`, session retained for retry, nothing published |
 | ref publish error | `500`, objects left for GC |

@@ -200,7 +200,7 @@ removes one.
   never lost (the round-trip check catches it before publishing), but the
   layer keeps its original compressed size on disk instead of decomposing.
   The cause is a comp-prysm zlib level-0 bug, not oci-amber, tar-prism or the
-  store — see the comp-prysm issue (`roundtrip-investigation.md` has the
+  store — see the comp-prysm issue (`docs/comp-prysm-zlib-level0-roundtrip.md` has the
   reproduction).
 
 ## Development

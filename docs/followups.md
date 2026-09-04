@@ -116,3 +116,8 @@ Collected from the per-task and whole-branch reviews of the initial implementati
 
 - if file.Close fails but the unlink succeeds, the fd close is never retried (no OS leak; stale *os.File in a forgotten session) (upload/session.go:207-219)
 
+
+### Observed during the final fix wave
+
+- A gzipped empty tar (the 1024 zero-byte end-of-archive marker, e.g. an OCI empty layer) is now classified raw/not-tar because an all-zero first block fails the tar-header probe; harmless (round-trips, 32 bytes) and consistent with the format=none rule, but a behaviour change worth a test.
+- Sweep counts a session whose close failed; blob.New no longer removes a stale non-directory at <WorkDir>/spool (unreachable under the ownership rule).
