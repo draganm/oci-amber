@@ -14,6 +14,7 @@ const (
 	MediaTypeDockerManifest     = "application/vnd.docker.distribution.manifest.v2+json"
 	MediaTypeDockerManifestList = "application/vnd.docker.distribution.manifest.list.v2+json"
 	MediaTypeOCIConfig          = "application/vnd.oci.image.config.v1+json"
+	MediaTypeDockerConfig       = "application/vnd.docker.container.image.v1+json"
 	MediaTypeOctetStream        = "application/octet-stream"
 )
 
