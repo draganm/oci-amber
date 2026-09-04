@@ -38,8 +38,8 @@ nix develop            # or `direnv allow` once
 nix develop --command go run ./cmd/oci-amber serve --store /tmp/oci-amber --listen 127.0.0.1:5000
 
 # or build the binary first
-nix develop --command go build -o /usr/local/bin/oci-amber ./cmd/oci-amber
-oci-amber serve --store /var/lib/oci-amber
+nix develop --command go build -o ./oci-amber ./cmd/oci-amber
+./oci-amber serve --store /var/lib/oci-amber
 ```
 
 Then push and pull as usual:
@@ -147,7 +147,9 @@ prism line never carries `raw_reason`; a raw line never carries `engine` or
 store, `deduped_bytes` the part that already existed, and `disk_bytes` what
 was actually appended to pack segments; the blob root and its `meta.json` are
 not counted. A blob that is uploaded again is not re-ingested and counts as
-fully deduplicated.
+fully deduplicated: instead of a `blob stored` line, a whole-blob dedup hit
+(the pushed digest already exists) logs `msg="blob already present"` at Info
+with `digest` and `size`, and nothing is written.
 
 After every manifest or index push, one line per image (an identical
 re-push logs again, with `disk_bytes=0` and `compression_ratio=+Inf`):
@@ -192,6 +194,14 @@ removes one.
 - Upload sessions do not survive a restart; clients restart the blob on
   `BLOB_UPLOAD_UNKNOWN`.
 - Only `sha256` digests.
+- A layer gzipped at best-speed over content that barely compresses (the
+  shape `crane append` and `go-containerregistry`'s tarball writer produce)
+  currently falls back to raw with `raw_reason=roundtrip-failed`: bytes are
+  never lost (the round-trip check catches it before publishing), but the
+  layer keeps its original compressed size on disk instead of decomposing.
+  The cause is a comp-prysm zlib level-0 bug, not oci-amber, tar-prism or the
+  store — see the comp-prysm issue (`roundtrip-investigation.md` has the
+  reproduction).
 
 ## Development
 
