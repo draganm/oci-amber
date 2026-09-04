@@ -147,3 +147,21 @@ func TestErrorResponseJSON(t *testing.T) {
 		t.Fatalf("decoded detail %v", resp.Errors[0].Detail)
 	}
 }
+
+func TestExtensionCodes(t *testing.T) {
+	cases := []struct {
+		code ErrorCode
+		wire string
+		want int
+	}{
+		{CodeRootfsUnavailable, "ROOTFS_UNAVAILABLE", http.StatusNotFound},
+		{CodePathUnknown, "PATH_UNKNOWN", http.StatusNotFound},
+		{CodePathInvalid, "PATH_INVALID", http.StatusBadRequest},
+		{CodePlatformUnknown, "PLATFORM_UNKNOWN", http.StatusBadRequest},
+	}
+	for _, tc := range cases {
+		if string(tc.code) != tc.wire || tc.code.DefaultStatus() != tc.want {
+			t.Errorf("%s: wire %q status %d, want %q %d", tc.code, string(tc.code), tc.code.DefaultStatus(), tc.wire, tc.want)
+		}
+	}
+}

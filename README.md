@@ -21,6 +21,13 @@ Layers whose compression cannot be reproduced exactly (a compressor
 zrecipe does not know, a corrupt stream, a blob that is not a tar) are
 stored verbatim and served with range support.
 
+Every pushed container image also gets a root filesystem view: the layers
+applied in order with OCI whiteout semantics, stored in the image root as
+an amber directory tree whose regular files point at the content the layers
+already hold. Building it replays tar headers from the stored recipes and
+reads at most a block of file content. The `/fs/` API serves it: directory
+listings as JSON, files with ranges, directories as tars.
+
 ## Requirements
 
 Everything is provided by the Nix flake: Go 1.26, `pkg-config`, `zlib` and
@@ -111,6 +118,24 @@ exact manifest bytes in `manifest`, `meta.json`, and `blobs/` (and
 `manifests/` for an index) whose entries point at the referenced roots, so an
 image is one reachable tree.
 
+The image root of a container image (an image manifest whose config is an
+OCI or Docker image config) also holds `rootfs/`, the root filesystem the
+layers produce: a plain amber directory tree with the tar's modes,
+ownership, mtimes, symlinks, hard links, device nodes, FIFOs and extended
+attributes, whose regular files point at the content the layers' prisms
+already store, so it adds only directory objects and spilled xattr sets,
+and amber's own tools can export or restore it. Its `meta.json` carries a
+`rootfs` object with
+`status` (`ok`, `partial`, `unavailable` or `not-applicable`) and `entries`;
+`partial` lists the first 100 skipped entries with their layer, path and
+reason plus `skippedCount`, `unavailable` gives the `reason`. A raw layer or
+one whose headers `archive/tar` rejects makes the rootfs unavailable; a
+sparse file, a path escaping the root, a hard link without a target or a
+type tar cannot place is skipped. The push succeeds either way. Indexes and
+artifacts have no rootfs; re-pushing a manifest reuses the tree already
+stored under its digest (an unavailable one is tried again), and the same
+image in two repositories shares every rootfs object.
+
 ## HTTP surface
 
 The full distribution API: blob HEAD/GET/DELETE with single-range requests
@@ -134,6 +159,65 @@ regardless of what the client had.
 Manifests are capped at 4 MiB (`413`). Blob uploads are not size limited.
 Range requests on prism-stored layers are answered with the full body.
 
+## Rootfs API
+
+The root filesystem view of a container image is served under `/fs/`,
+outside the distribution API:
+
+```
+GET /fs/<repo>:<tag>/<path>
+GET /fs/<repo>@<digest>/<path>
+```
+
+The first path segment holding `@` or `:` ends the image reference (a
+repository name can contain neither), everything after it is a path inside
+the rootfs, cleaned with URL semantics so `..` never leaves the root.
+Symlinks are followed in every component, the last one included, with
+absolute targets rooted at the rootfs and a 40-hop bound, so `bin/ls` works
+on a usrmerge image. `HEAD` returns the same headers as `GET` without a
+body; other methods are `405`.
+
+| Resolved entry | Query | Answer |
+|---|---|---|
+| directory | none | `200 application/json` listing, `n`/`last` pagination with a `Link` header like `tags/list` |
+| directory | `format=tar` | `200 application/x-tar`, a streamed PAX tar of the subtree with names relative to the directory (like `tar -C dir .`); the root gives the whole rootfs |
+| regular file | none | `200 application/octet-stream` with `Content-Length`, `Accept-Ranges: bytes`, a single `Range` honoured with `206`, `ETag` from the content key and `If-None-Match` answering `304` |
+| regular file | `format=tar` | `400 PATH_INVALID` |
+| device, fifo, socket | none | `200 application/json`, the entry object alone |
+
+A listing:
+
+```json
+{"path": "etc",
+ "entries": [
+  {"name": "passwd", "type": "file", "mode": "0644", "uid": 0, "gid": 0, "mtime": "2026-09-03T18:00:00Z", "size": 1234},
+  {"name": "rc.d", "type": "dir", "mode": "0755", "uid": 0, "gid": 0, "mtime": "2026-09-03T18:00:00Z"},
+  {"name": "mtab", "type": "symlink", "mode": "0777", "uid": 0, "gid": 0, "mtime": "2026-09-03T18:00:00Z", "target": "/proc/mounts"},
+  {"name": "null", "type": "char", "mode": "0666", "uid": 0, "gid": 0, "mtime": "2026-09-03T18:00:00Z", "major": 1, "minor": 3}]}
+```
+
+`type` is `file`, `dir`, `symlink`, `char`, `block`, `fifo` or `socket`;
+`mode` is the permission, setuid, setgid and sticky bits in octal; `size`
+appears on files, `target` on symlinks, `major` and `minor` on devices.
+Entries are in name order.
+
+A reference that resolves to an index needs `?platform=<os>/<arch>[/<variant>]`
+to pick the child manifest; without it, or with no match, the answer is
+`400 PLATFORM_UNKNOWN` whose `detail` lists the children's platforms. An
+image without a view (a raw layer, an artifact, a root stored before views
+existed) is `404 ROOTFS_UNAVAILABLE` with the status and reason in
+`detail`. A missing path is `404 PATH_UNKNOWN`; a symlink loop, a bad
+`format` or `format=tar` on a file is `400 PATH_INVALID`. These four codes
+are oci-amber extensions rendered in the standard error envelope.
+
+```sh
+curl -s http://127.0.0.1:5000/fs/library/app:v1/etc | jq .
+curl -s http://127.0.0.1:5000/fs/library/app:v1/etc/os-release
+curl -s -r 0-1023 http://127.0.0.1:5000/fs/library/app:v1/usr/bin/app -o head.bin
+curl -s 'http://127.0.0.1:5000/fs/library/app:v1/usr/share?format=tar' | tar -tv
+curl -s 'http://127.0.0.1:5000/fs/library/app:latest/etc?platform=linux/arm64' | jq .
+```
+
 ## Logging
 
 Logs are `log/slog` text lines on stderr; `--log-level` selects the
@@ -151,9 +235,10 @@ that reproduces the layer and `entries` counts its regular files) or `raw`
 (verbatim bytes; `raw_reason` is one of `not-reproducible`, `unsupported`,
 `corrupt`, `not-tar`, `analyze-timeout`, `roundtrip-failed`,
 `decompose-failed`). An uncompressed tar is a prism with `format=none` and an
-empty `engine`: there is no compressor whose output has to be reproduced. A
-prism line never carries `raw_reason`; a raw line never carries `engine` or
-`entries`. `logical_bytes` is the encoded size of every object offered to the
+empty `engine`: there is no compressor whose output has to be reproduced. An
+empty archive (nothing but zero blocks, the blob Docker uses as an empty
+layer) is a prism with `entries=0`. A prism line never carries
+`raw_reason`; a raw line never carries `engine` or `entries`. `logical_bytes` is the encoded size of every object offered to the
 store, `deduped_bytes` the part that already existed, and `disk_bytes` what
 was actually appended to pack segments; the blob root and its `meta.json` are
 not counted. A blob that is uploaded again is not re-ingested and counts as
@@ -166,7 +251,7 @@ After every manifest or index push, one line per image (an identical
 re-push logs again, with `disk_bytes=0` and `compression_ratio=+Inf`):
 
 ```
-time=2026-09-03T18:00:02.007+02:00 level=INFO msg="image pushed" repo=library/app reference=v1 digest=sha256:c81d… kind=manifest blobs=3 manifests=0 total_bytes=95631872 logical_bytes=327545651 deduped_bytes=293700000 deduped_percent=89.7 disk_bytes=10276044 compression_ratio=9.31 duration=18.6ms
+time=2026-09-03T18:00:02.007+02:00 level=INFO msg="image pushed" repo=library/app reference=v1 digest=sha256:c81d… kind=manifest blobs=3 manifests=0 rootfs=ok rootfs_entries=4213 total_bytes=95631872 logical_bytes=327545651 deduped_bytes=293700000 deduped_percent=89.7 disk_bytes=10276044 compression_ratio=9.31 duration=18.6ms
 time=2026-09-03T18:00:02.311+02:00 level=INFO msg="image pushed" repo=library/app reference=latest digest=sha256:e07a… kind=index blobs=0 manifests=2 total_bytes=191267209 logical_bytes=655091302 deduped_bytes=620841219 deduped_percent=94.8 disk_bytes=10280120 compression_ratio=18.61 duration=4.2ms
 ```
 
@@ -179,6 +264,15 @@ already present count as fully deduplicated) and the manifest's own objects.
 reached the disk) and `deduped_percent` is
 `100 * deduped_bytes / logical_bytes`. The same numbers are stored in the
 image's `meta.json`.
+
+A manifest line also carries `rootfs=<status>` and, when a tree was stored,
+`rootfs_entries=<n>`; an index line carries neither. A rootfs that is
+missing or incomplete logs one more line at Warn level:
+
+```
+time=2026-09-03T18:00:02.008+02:00 level=WARN msg="rootfs unavailable" repo=library/app digest=sha256:c81d… reason="layer sha256:9b2e… is stored raw (not-reproducible)"
+time=2026-09-03T18:00:02.008+02:00 level=WARN msg="rootfs partial" repo=library/app digest=sha256:c81d… skipped=1 path=usr/lib/big.img reason="sparse file"
+```
 
 Internal failures answer `500` with `{"errors":[]}` and log
 `msg="request failed"` at Error level with `method`, `path` and `error`; a
@@ -205,6 +299,14 @@ removes one.
 - Upload sessions do not survive a restart; clients restart the blob on
   `BLOB_UPLOAD_UNKNOWN`.
 - Only `sha256` digests.
+- The rootfs view is built for image manifests only and skips what a tar
+  cannot faithfully place: sparse files, paths escaping the root, hard links
+  without a target, unknown entry types. A raw layer or a hard link carrying
+  a payload (which `archive/tar` cannot parse) leaves the image without a
+  view.
+- The rootfs API is read-only, unauthenticated like the rest, lists no
+  extended attributes (the tar carries them) and does not sniff content
+  types.
 - A layer that zrecipe accepts but cannot rebuild is stored raw with
   `raw_reason=roundtrip-failed`; bytes are never lost because the round-trip
   check runs before publishing. zrecipe v0.1.0 did this for layers gzipped at
@@ -212,6 +314,14 @@ removes one.
   produces); v0.2.0 fixed it and the crane smoke test now asserts such a
   layer becomes a prism. `docs/zrecipe-zlib-level0-roundtrip.md` records the
   investigation.
+- Layers written by umoci and rockcraft (Canonical's rocks on Docker Hub,
+  `ubuntu` included) are klauspost pgzip streams over an old klauspost
+  encoder; zrecipe v0.2.0 stored them raw as `not-reproducible`, v0.3.0
+  reproduces them with its `pgzip` engine
+  ([zrecipe#2](https://github.com/draganm/zrecipe/issues/2)). A blob is
+  classified once: a layer stored raw by an earlier binary stays raw, and
+  gets no rootfs view, until `DELETE /v2/<name>/blobs/<digest>` removes it
+  and the image is pushed again.
 
 ## Development
 

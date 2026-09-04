@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/draganm/oci-amber/oci"
+	"github.com/draganm/oci-amber/rootfs"
 )
 
 // Kind says whether an image root holds an image manifest or an index.
@@ -24,7 +25,29 @@ const (
 	MetaFile     = "meta.json" // Meta
 	BlobsDir     = "blobs"     // <digest> -> blob root, for config and layers
 	ManifestsDir = "manifests" // <digest> -> child image root, index only
+	RootfsDir    = "rootfs"    // the merged root filesystem, manifests with status ok or partial
 )
+
+// RootfsStatus says whether an image root holds a rootfs/ and why not.
+type RootfsStatus string
+
+const (
+	RootfsOK            RootfsStatus = "ok"             // rootfs/ holds every entry of every layer
+	RootfsPartial       RootfsStatus = "partial"        // rootfs/ is present; Skipped lists what was left out
+	RootfsUnavailable   RootfsStatus = "unavailable"    // no rootfs/; Reason says which layer prevented it
+	RootfsNotApplicable RootfsStatus = "not-applicable" // the manifest does not describe a container image
+)
+
+// Rootfs is the rootfs field of a manifest's meta.json. Entries is the
+// number of entries under rootfs/, the root excluded; it is 0 unless Status
+// is RootfsOK or RootfsPartial.
+type Rootfs struct {
+	Status       RootfsStatus  `json:"status"`
+	Entries      int           `json:"entries"`
+	Reason       string        `json:"reason,omitempty"`
+	Skipped      []rootfs.Skip `json:"skipped,omitempty"`
+	SkippedCount int           `json:"skippedCount,omitempty"`
+}
 
 // ErrNotFound is returned by Open and Delete when the reference does not
 // exist.
@@ -80,6 +103,7 @@ type Meta struct {
 	Annotations  map[string]string `json:"annotations,omitempty"`
 	CreatedAt    time.Time         `json:"createdAt"`
 	Stats        Stats             `json:"stats"`
+	Rootfs       *Rootfs           `json:"rootfs,omitempty"`
 }
 
 // metaVersion is the Meta.Version written by this binary.

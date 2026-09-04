@@ -22,7 +22,7 @@ import (
 //     logical = deduped = size, disk = 0.
 //   - Each unique index child: its stored meta.json stats.
 //   - manifestObjects, the Writer stats of the manifest's own objects
-//     (manifest bytes, blobs/, manifests/), are added.
+//     (manifest bytes, blobs/, manifests/ and the rootfs/ tree), are added.
 //
 // Child roots are resolved through oci/manifest/<repo>/<digest>; a missing
 // child is CodeManifestBlobUnknown.
@@ -82,18 +82,27 @@ func (s *Store) computeStats(ctx context.Context, repo string, m *oci.Manifest, 
 
 // logPushed emits the image log line at Info level:
 //
-//	image pushed repo=library/app reference=v1 digest=sha256:… kind=manifest blobs=7 manifests=0 total_bytes=… logical_bytes=… deduped_bytes=… deduped_percent=89.7 disk_bytes=… compression_ratio=9.31 duration=…
+//	image pushed repo=library/app reference=v1 digest=sha256:… kind=manifest blobs=7 manifests=0 rootfs=ok rootfs_entries=4213 total_bytes=… logical_bytes=… deduped_bytes=… deduped_percent=89.7 disk_bytes=… compression_ratio=9.31 duration=…
 //
 // Byte counts are raw integers; the two ratios are rounded to one and two
 // decimals. compression_ratio is +Inf when nothing was written to disk.
+// rootfs is present on manifests only, rootfs_entries when a tree exists.
 func (s *Store) logPushed(repo, reference string, m *Meta, blobs, manifests int, d time.Duration) {
-	s.log.Info("image pushed",
+	attrs := []any{
 		"repo", repo,
 		"reference", reference,
 		"digest", string(m.Digest),
 		"kind", string(m.Kind),
 		"blobs", blobs,
 		"manifests", manifests,
+	}
+	if m.Rootfs != nil {
+		attrs = append(attrs, "rootfs", string(m.Rootfs.Status))
+		if m.Rootfs.Status == RootfsOK || m.Rootfs.Status == RootfsPartial {
+			attrs = append(attrs, "rootfs_entries", m.Rootfs.Entries)
+		}
+	}
+	attrs = append(attrs,
 		"total_bytes", m.Stats.TotalBytes,
 		"logical_bytes", m.Stats.LogicalBytes,
 		"deduped_bytes", m.Stats.DedupedBytes,
@@ -102,6 +111,7 @@ func (s *Store) logPushed(repo, reference string, m *Meta, blobs, manifests int,
 		"compression_ratio", roundTo(m.Stats.CompressionRatio(), 2),
 		"duration", d,
 	)
+	s.log.Info("image pushed", attrs...)
 }
 
 // roundTo rounds x to n decimal places; infinities and NaN pass through.

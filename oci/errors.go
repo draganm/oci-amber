@@ -24,6 +24,13 @@ const (
 	CodeDenied              ErrorCode = "DENIED"
 	CodeUnsupported         ErrorCode = "UNSUPPORTED"
 	CodeTooManyRequests     ErrorCode = "TOOMANYREQUESTS"
+
+	// oci-amber extensions for the rootfs API under /fs/; they are not in
+	// the distribution spec's list.
+	CodeRootfsUnavailable ErrorCode = "ROOTFS_UNAVAILABLE" // the image has no rootfs tree
+	CodePathUnknown       ErrorCode = "PATH_UNKNOWN"       // a path component is missing or not a directory
+	CodePathInvalid       ErrorCode = "PATH_INVALID"       // symlink loop, format=tar off a directory, unknown format
+	CodePlatformUnknown   ErrorCode = "PLATFORM_UNKNOWN"   // an index without a usable platform
 )
 
 // DefaultStatus returns the HTTP status the registry answers with for an
@@ -31,10 +38,10 @@ const (
 func (c ErrorCode) DefaultStatus() int {
 	switch c {
 	case CodeBlobUnknown, CodeBlobUploadUnknown, CodeManifestBlobUnknown,
-		CodeManifestUnknown, CodeNameUnknown:
+		CodeManifestUnknown, CodeNameUnknown, CodeRootfsUnavailable, CodePathUnknown:
 		return http.StatusNotFound
 	case CodeBlobUploadInvalid, CodeDigestInvalid, CodeManifestInvalid,
-		CodeNameInvalid, CodeSizeInvalid:
+		CodeNameInvalid, CodeSizeInvalid, CodePathInvalid, CodePlatformUnknown:
 		return http.StatusBadRequest
 	case CodeUnauthorized:
 		return http.StatusUnauthorized

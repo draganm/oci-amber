@@ -3,6 +3,7 @@ package blob
 import (
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"io"
 
@@ -20,6 +21,18 @@ type Blob struct {
 
 // Root returns the key of the blob root directory.
 func (bl *Blob) Root() key.Key { return bl.root }
+
+// ErrNotPrism reports a raw blob where a prism was needed.
+var ErrNotPrism = errors.New("blob: not a prism")
+
+// Prism returns the parts of a prism blob root. A raw blob returns an error
+// wrapping ErrNotPrism that names the raw reason.
+func (bl *Blob) Prism() (*Prism, error) {
+	if bl.Meta.Kind != KindPrism {
+		return nil, fmt.Errorf("%w: %s is stored %s (%s)", ErrNotPrism, bl.Meta.Digest, bl.Meta.Kind, bl.Meta.RawReason)
+	}
+	return bl.store.openSource(bl.root)
+}
 
 // SupportsRange reports whether WriteRange can serve this blob. Only raw
 // blobs support ranges; prisms are always served whole.

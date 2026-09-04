@@ -14,19 +14,63 @@ const (
 	MediaTypeDockerManifest     = "application/vnd.docker.distribution.manifest.v2+json"
 	MediaTypeDockerManifestList = "application/vnd.docker.distribution.manifest.list.v2+json"
 	MediaTypeOCIConfig          = "application/vnd.oci.image.config.v1+json"
+	MediaTypeDockerConfig       = "application/vnd.docker.container.image.v1+json"
 	MediaTypeOctetStream        = "application/octet-stream"
 )
 
 // Descriptor is an OCI content descriptor restricted to the fields the
 // registry needs: it is what ParseManifest collects from config, layers,
-// manifests and subject, and what the referrers API returns. Fields such as
-// platform, urls and data are ignored on input and never produced.
+// manifests and subject, and what the referrers API returns. Platform is
+// kept for index children, which the rootfs API selects by it; fields such
+// as urls and data are ignored on input and never produced.
 type Descriptor struct {
 	MediaType    string            `json:"mediaType"`
 	Digest       Digest            `json:"digest"`
 	Size         int64             `json:"size"`
 	ArtifactType string            `json:"artifactType,omitempty"`
 	Annotations  map[string]string `json:"annotations,omitempty"`
+	Platform     *Platform         `json:"platform,omitempty"`
+}
+
+// Platform is the platform of an index child: the fields the rootfs API
+// selects a child manifest by.
+type Platform struct {
+	OS           string `json:"os"`
+	Architecture string `json:"architecture"`
+	Variant      string `json:"variant,omitempty"`
+}
+
+// String renders os/architecture[/variant].
+func (p Platform) String() string {
+	s := p.OS + "/" + p.Architecture
+	if p.Variant != "" {
+		s += "/" + p.Variant
+	}
+	return s
+}
+
+// ParsePlatform parses os/architecture[/variant]; no part may be empty.
+func ParsePlatform(s string) (Platform, error) {
+	parts := strings.Split(s, "/")
+	if len(parts) < 2 || len(parts) > 3 {
+		return Platform{}, fmt.Errorf("platform %q is not os/architecture[/variant]", s)
+	}
+	for _, part := range parts {
+		if part == "" {
+			return Platform{}, fmt.Errorf("platform %q is not os/architecture[/variant]", s)
+		}
+	}
+	p := Platform{OS: parts[0], Architecture: parts[1]}
+	if len(parts) == 3 {
+		p.Variant = parts[2]
+	}
+	return p, nil
+}
+
+// Matches reports whether c satisfies the request p: the same os and
+// architecture, and the same variant when p names one.
+func (p Platform) Matches(c Platform) bool {
+	return p.OS == c.OS && p.Architecture == c.Architecture && (p.Variant == "" || p.Variant == c.Variant)
 }
 
 // Manifest is the parsed shape shared by image manifests (config, layers)

@@ -5,9 +5,11 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/crc32"
 	"io"
 	"os/exec"
 	"strings"
@@ -16,6 +18,8 @@ import (
 
 	tarprism "github.com/draganm/tar-prism"
 	zrecipe "github.com/draganm/zrecipe"
+	"github.com/draganm/zrecipe/engine"
+	"github.com/draganm/zrecipe/engine/pgzip"
 	"github.com/klauspost/compress/zstd"
 
 	"github.com/draganm/oci-amber/oci"
@@ -618,5 +622,147 @@ func TestAmberSinkCloseRecipeUnblocksPutStreamGoroutine(t *testing.T) {
 	// still be safe and must not block.
 	if err := sink.recipe.Close(); err != nil {
 		t.Fatalf("second Close: %v", err)
+	}
+}
+
+func TestBlobPrismParts(t *testing.T) {
+	b, _, _ := newTestStore(t, Options{VerifyRoundTrip: true})
+	ctx := context.Background()
+	content := textBytes(5000, 11)
+	data := gzipBytes(t, tarBytes(t, "etc/motd", content), gzip.DefaultCompression)
+	meta, err := b.Put(ctx, spoolOf(data))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if meta.Kind != KindPrism {
+		t.Fatalf("kind = %s, want prism", meta.Kind)
+	}
+	bl, err := b.Open(meta.Digest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := bl.Prism()
+	if err != nil {
+		t.Fatal(err)
+	}
+	idx, err := p.Index()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(idx.Entries) != 1 || idx.Entries[0].Name != "etc/motd" {
+		t.Fatalf("index entries = %+v", idx.Entries)
+	}
+	k, err := p.BlobKey(0, idx.Entries[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if int64(k.Length()) != idx.Entries[0].Size {
+		t.Fatalf("blob key length %d, index size %d", k.Length(), idx.Entries[0].Size)
+	}
+	r, err := p.Blob(0, idx.Entries[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := io.ReadAll(r)
+	r.Close()
+	if err != nil || !bytes.Equal(got, content) {
+		t.Fatalf("blob content differs (%v)", err)
+	}
+	rc, err := p.Recipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	recipe, err := io.ReadAll(rc)
+	rc.Close()
+	if err != nil || !bytes.HasPrefix(recipe, []byte("etc/motd\x00")) {
+		t.Fatalf("recipe is %d bytes and does not start with the header (%v)", len(recipe), err)
+	}
+	if _, err := p.BlobKey(0, tarprism.Entry{Blob: "blobs/00000009", Size: 1}); err == nil {
+		t.Fatal("BlobKey of an absent blob succeeded")
+	}
+
+	raw, err := b.Put(ctx, spoolOf([]byte(`{"architecture":"amd64"}`)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rb, err := b.Open(raw.Digest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := rb.Prism(); !errors.Is(err, ErrNotPrism) {
+		t.Fatalf("Prism() on a raw blob = %v, want ErrNotPrism", err)
+	}
+}
+
+// pgzipBytes compresses data the way umoci and rockcraft do: klauspost's
+// parallel gzip (1 MiB blocks, 16 KiB dictionary tails, a sync flush per
+// block) over klauspost/compress v1.11.3, through zrecipe's pgzip engine,
+// framed as a gzip file with the header pgzip writes (OS byte 255).
+func pgzipBytes(t *testing.T, data []byte) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	buf.Write([]byte{0x1f, 0x8b, 8, 0, 0, 0, 0, 0, 0, 0xff})
+	w, err := pgzip.New().NewWriter(&buf, engine.DeflateParams{Level: 5})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.Write(data); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	var trailer [8]byte
+	binary.LittleEndian.PutUint32(trailer[:4], crc32.ChecksumIEEE(data))
+	binary.LittleEndian.PutUint32(trailer[4:], uint32(len(data)))
+	buf.Write(trailer[:])
+	return buf.Bytes()
+}
+
+// TestPutPgzipLayer pins the zrecipe release that reproduces umoci and
+// rockcraft layers (Canonical's rocks on Docker Hub, ubuntu included):
+// zrecipe v0.2.0 stored them raw as not-reproducible.
+func TestPutPgzipLayer(t *testing.T) {
+	b, _, logs := newTestStore(t, Options{VerifyRoundTrip: true})
+	ctx := context.Background()
+	// Three files of text spanning several 1 MiB pgzip blocks.
+	var tarBuf bytes.Buffer
+	tw := tar.NewWriter(&tarBuf)
+	for i, size := range []int{1500_000, 900_000, 1_200_000} {
+		content := textBytes(size, int64(i+1))
+		if err := tw.WriteHeader(&tar.Header{Name: fmt.Sprintf("usr/lib/lib%d.so", i), Mode: 0o644, Size: int64(len(content))}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tw.Write(content); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	layer := pgzipBytes(t, tarBuf.Bytes())
+	if _, err := gzip.NewReader(bytes.NewReader(layer)); err != nil {
+		t.Fatalf("pgzip fixture is not a gzip file: %v", err)
+	}
+	meta, err := b.Put(ctx, spoolOf(layer))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if meta.Kind != KindPrism || meta.Engine != "pgzip" || meta.Entries != 3 {
+		t.Fatalf("meta = kind %s engine %q entries %d, want prism/pgzip/3 (%s)", meta.Kind, meta.Engine, meta.Entries, meta.RawReason)
+	}
+	bl, err := b.Open(meta.Digest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if err := bl.WriteTo(ctx, &out); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(out.Bytes(), layer) {
+		t.Fatal("pulled bytes differ from the pushed pgzip layer")
+	}
+	if !strings.Contains(logs.String(), "engine=pgzip") {
+		t.Fatalf("log:\n%s", logs.String())
 	}
 }

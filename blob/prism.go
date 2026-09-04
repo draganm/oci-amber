@@ -376,7 +376,7 @@ func (b *Store) finalizePrism(ctx context.Context, sp *upload.Spool, params *zre
 		if err != nil {
 			return prismResult{}, store.Stats{}, fmt.Errorf("blob: reading back %s for round-trip check: %w", CompFile, err)
 		}
-		src := &amberSource{st: b.st, recipe: res.recipe, index: res.index, blobs: res.blobs}
+		src := &Prism{st: b.st, recipe: res.recipe, index: res.index, blobs: res.blobs}
 		if err := roundTripCheck(ctx, b, src, storedParams, d); err != nil {
 			if cerr := ctx.Err(); cerr != nil {
 				return prismResult{}, store.Stats{}, cerr
@@ -391,7 +391,7 @@ func (b *Store) finalizePrism(ctx context.Context, sp *upload.Spool, params *zre
 // roundTripCheck runs the pull pipeline over freshly ingested prism objects
 // into a sha256 and compares the result with the OCI digest. It is a
 // variable so tests can force a failure or count calls.
-var roundTripCheck = func(ctx context.Context, b *Store, src *amberSource, params *zrecipe.Params, want oci.Digest) error {
+var roundTripCheck = func(ctx context.Context, b *Store, src *Prism, params *zrecipe.Params, want oci.Digest) error {
 	h := sha256.New()
 	if err := composeRecompress(ctx, h, src, params); err != nil {
 		return err
@@ -402,17 +402,18 @@ var roundTripCheck = func(ctx context.Context, b *Store, src *amberSource, param
 	return nil
 }
 
-// amberSource implements tarprism.Source over the objects of one prism:
-// recipe.bin and every blob are streamed with store.Reader, recipe.json is
-// read whole.
-type amberSource struct {
+// Prism is one prism blob's parts as tar-prism's Source: recipe.bin and
+// every blob are streamed with store.Reader, recipe.json is read whole.
+// BlobKey exposes a file's content key so that a tree can reference it
+// without reading it.
+type Prism struct {
 	st     *store.Store
 	recipe key.Key
 	index  key.Key
 	blobs  key.Key
 }
 
-func (s *amberSource) Index() (*tarprism.Index, error) {
+func (s *Prism) Index() (*tarprism.Index, error) {
 	data, err := s.st.ReadFile(s.index)
 	if err != nil {
 		return nil, fmt.Errorf("reading %s: %w", tarprism.IndexFile, err)
@@ -420,28 +421,38 @@ func (s *amberSource) Index() (*tarprism.Index, error) {
 	return tarprism.DecodeIndex(data)
 }
 
-func (s *amberSource) Recipe() (io.ReadCloser, error) {
+func (s *Prism) Recipe() (io.ReadCloser, error) {
 	return s.st.NewReader(s.recipe), nil
 }
 
-func (s *amberSource) Blob(index int, entry tarprism.Entry) (io.ReadCloser, error) {
+// BlobKey returns the content key of entry's blob, checking that the stored
+// length matches the index.
+func (s *Prism) BlobKey(index int, entry tarprism.Entry) (key.Key, error) {
 	name, ok := strings.CutPrefix(entry.Blob, tarprism.BlobsDir+"/")
 	if !ok || name == "" || strings.Contains(name, "/") {
-		return nil, fmt.Errorf("entry %d (%s): blob path %q is not directly under %s/", index, entry.Name, entry.Blob, tarprism.BlobsDir)
+		return key.Key{}, fmt.Errorf("entry %d (%s): blob path %q is not directly under %s/", index, entry.Name, entry.Blob, tarprism.BlobsDir)
 	}
 	k, err := s.st.LookupKey(s.blobs, name)
 	if err != nil {
-		return nil, fmt.Errorf("entry %d (%s): %w", index, entry.Name, err)
+		return key.Key{}, fmt.Errorf("entry %d (%s): %w", index, entry.Name, err)
 	}
 	if int64(k.Length()) != entry.Size {
-		return nil, fmt.Errorf("entry %d (%s): blob %s is %d bytes, index says %d", index, entry.Name, entry.Blob, k.Length(), entry.Size)
+		return key.Key{}, fmt.Errorf("entry %d (%s): blob %s is %d bytes, index says %d", index, entry.Name, entry.Blob, k.Length(), entry.Size)
+	}
+	return k, nil
+}
+
+func (s *Prism) Blob(index int, entry tarprism.Entry) (io.ReadCloser, error) {
+	k, err := s.BlobKey(index, entry)
+	if err != nil {
+		return nil, err
 	}
 	return s.st.NewReader(k), nil
 }
 
 // openSource resolves the prism files of a blob root.
-func (b *Store) openSource(root key.Key) (*amberSource, error) {
-	src := &amberSource{st: b.st}
+func (b *Store) openSource(root key.Key) (*Prism, error) {
+	src := &Prism{st: b.st}
 	var err error
 	if src.recipe, err = b.st.LookupKey(root, tarprism.RecipeFile); err != nil {
 		return nil, fmt.Errorf("blob: %s: %w", tarprism.RecipeFile, err)
@@ -486,7 +497,7 @@ func (b *Store) readCompParams(k key.Key) (*zrecipe.Params, error) {
 // Nothing touches the disk. Once ctx is done the pipe is closed at once, so
 // a client that went away does not make Recompress compose and drain the
 // whole layer for its digest check; the context's error is then reported.
-func composeRecompress(ctx context.Context, w io.Writer, src *amberSource, params *zrecipe.Params) error {
+func composeRecompress(ctx context.Context, w io.Writer, src *Prism, params *zrecipe.Params) error {
 	pr, pw := io.Pipe()
 	composed := make(chan error, 1)
 	go func() {

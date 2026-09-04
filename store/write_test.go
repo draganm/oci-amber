@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/jobs-build/amber-store-core/amberpack"
+	"github.com/jobs-build/amber-store-core/cborx"
 	"github.com/jobs-build/amber-store-core/fstree"
 	"github.com/jobs-build/amber-store-core/key"
 	"github.com/jobs-build/amber-store-core/packstore"
@@ -473,3 +474,40 @@ func TestPutStreamPropagatesReaderError(t *testing.T) {
 type writeTestErrReader struct{ err error }
 
 func (e writeTestErrReader) Read([]byte) (int, error) { return 0, e.err }
+
+func TestPutXattrsInlineAndSpilled(t *testing.T) {
+	s := openWriterStore(t)
+	w := s.NewWriter(context.Background())
+	defer w.Abort()
+	inline, spilled, err := w.PutXattrs(nil)
+	if err != nil || inline != nil || spilled != (key.Key{}) {
+		t.Fatalf("PutXattrs(nil) = %v, %s, %v; want nothing", inline, spilled, err)
+	}
+	small := map[string][]byte{"security.capability": []byte("\x01\x00\x00\x02")}
+	inline, spilled, err = w.PutXattrs(small)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if spilled != (key.Key{}) || !bytes.Equal(inline, cborx.EncodeXattrs(small)) {
+		t.Fatalf("small set: inline %x, spilled %s", inline, spilled)
+	}
+	large := map[string][]byte{"user.big": bytes.Repeat([]byte("x"), XattrInlineMax)}
+	inline, spilled, err = w.PutXattrs(large)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if inline != nil || spilled == (key.Key{}) || spilled.Type() != key.XattrSet {
+		t.Fatalf("large set: inline %x, spilled %s", inline, spilled)
+	}
+	if _, err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	data, err := s.Get(spilled)
+	if err != nil {
+		t.Fatalf("spilled XattrSet not stored: %v", err)
+	}
+	got, err := cborx.DecodeXattrs(data)
+	if err != nil || !bytes.Equal(got["user.big"], large["user.big"]) {
+		t.Fatalf("decoded %v, %v", got, err)
+	}
+}

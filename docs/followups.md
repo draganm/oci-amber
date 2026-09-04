@@ -120,3 +120,18 @@ Collected from the per-task and whole-branch reviews of the initial implementati
 
 - A gzipped empty tar (the 1024 zero-byte end-of-archive marker, e.g. an OCI empty layer) is now classified raw/not-tar because an all-zero first block fails the tar-header probe; harmless (round-trips, 32 bytes) and consistent with the format=none rule, but a behaviour change worth a test.
 - Sweep counts a session whose close failed; blob.New no longer removes a stale non-directory at <WorkDir>/spool (unreachable under the ownership rule).
+
+### rootfs view (2026-09-04)
+
+Deferred from `docs/superpowers/specs/2026-09-04-rootfs-view-design.md`:
+
+- Move blob resolution and the rootfs build before the repository lock so concurrent pushes to one repository do not serialize on it.
+- A view for raw tar layers, storing their contents a second time.
+- Backfill command for existing stores (images already stored get a rootfs only when pushed again).
+- Metadata for the rootfs root directory itself (amber roots carry none).
+- Rootfs API (`/fs/`): extended attributes in listings, content-type sniffing for files, compressed tars, a `?platform=` default from the index's first child, nested indexes.
+- PAX sparse 1.0 maps are served for real from the content region so the layer parses; the entry is still skipped. Representing sparse files would need the holes expanded into the CAS.
+- `image.Meta.Rootfs.Entries` is always present (0 without a tree) rather than omitted, so an empty rootfs is distinguishable from an absent field in JSON without a pointer.
+- Stores written before this change hold Docker's empty layer (a gzipped empty tar) as raw `not-tar`; an image referencing it reports `unavailable` until that blob is deleted and pushed again, after which the next manifest push builds the view (an unavailable rootfs is never reused).
+- The merge tree and each layer's parsed entry list live in memory under the repository lock, proportional to the merged entry count; a hard cap (`unavailable: too many entries`) would bound a crafted push cheaply.
+- Rootfs API: a listing without `n` materialises the whole directory (tens of MB for a 200k-entry directory); a server-side page cap with `Link` continuation would bound it. A dangling symlink answers `PATH_UNKNOWN` without naming its target; the parent listing carries it, but the message could too.

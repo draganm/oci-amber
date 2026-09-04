@@ -15,6 +15,7 @@ import (
 	"github.com/draganm/oci-amber/blob"
 	"github.com/draganm/oci-amber/keyedmutex"
 	"github.com/draganm/oci-amber/oci"
+	"github.com/draganm/oci-amber/rootfs"
 	"github.com/draganm/oci-amber/store"
 	"github.com/jobs-build/amber-store-core/key"
 )
@@ -42,14 +43,28 @@ func New(st *store.Store, blobs *blob.Store, log *slog.Logger) *Store {
 
 // Image is an opened image root.
 type Image struct {
-	Meta     Meta
-	root     key.Key
-	manifest key.Key
-	st       *store.Store
+	Meta      Meta
+	root      key.Key
+	manifest  key.Key
+	rootfs    key.Key
+	hasRootfs bool
+	st        *store.Store
 }
 
 // Root returns the image root key.
 func (im *Image) Root() key.Key { return im.root }
+
+// Rootfs returns the key of the image's rootfs/ directory, when Meta.Rootfs
+// says one is present.
+func (im *Image) Rootfs() (key.Key, bool) { return im.rootfs, im.hasRootfs }
+
+// FS returns a reader over the image's rootfs/ tree, when it has one.
+func (im *Image) FS() (*rootfs.FS, bool) {
+	if !im.hasRootfs {
+		return nil, false
+	}
+	return rootfs.NewFS(im.st, im.rootfs), true
+}
 
 // WriteTo streams the stored manifest bytes to w while hashing them, and
 // returns ErrDigestMismatch if they do not hash to Meta.Digest. The bytes
@@ -159,10 +174,18 @@ func (s *Store) Put(ctx context.Context, repo, reference, contentType string, bo
 		meta.Kind = KindIndex
 	}
 
-	// Pass one: the manifest's own objects (manifest bytes, blobs/ and
-	// manifests/) through the accounting writer.
+	// Pass one: the rootfs (image manifests only), then the manifest's own
+	// objects (manifest bytes, blobs/ and manifests/), all through the
+	// accounting writer.
 	w := s.st.NewWriter(ctx)
 	defer w.Abort()
+	var rootfsKey key.Key
+	if !m.IsIndex() {
+		meta.Rootfs, rootfsKey, err = s.buildRootfs(ctx, w, repo, digest, m)
+		if err != nil {
+			return nil, err
+		}
+	}
 	manifestKey, err := w.PutBytes(body)
 	if err != nil {
 		return nil, fmt.Errorf("image: storing manifest: %w", err)
@@ -216,6 +239,11 @@ func (s *Store) Put(ctx context.Context, repo, reference, contentType string, bo
 	if err := root.AddFile(MetaFile, metaKey); err != nil {
 		return nil, fmt.Errorf("image: building root: %w", err)
 	}
+	if rootfsKey != (key.Key{}) {
+		if err := root.AddDir(RootfsDir, rootfsKey); err != nil {
+			return nil, fmt.Errorf("image: building root: %w", err)
+		}
+	}
 	rootKey, err := root.Finish()
 	if err != nil {
 		return nil, fmt.Errorf("image: building root: %w", err)
@@ -239,6 +267,7 @@ func (s *Store) Put(ctx context.Context, repo, reference, contentType string, bo
 		}
 	}
 	s.logPushed(repo, reference, &meta, len(blobRoots), len(childRoots), time.Since(start))
+	s.logRootfs(repo, digest, meta.Rootfs)
 	return &meta, nil
 }
 
@@ -363,7 +392,15 @@ func (s *Store) Open(repo, reference string) (*Image, error) {
 	if err != nil {
 		return nil, fmt.Errorf("image: %s in root %s: %w", ManifestFile, root, err)
 	}
-	return &Image{Meta: meta, root: root, manifest: manifestKey, st: s.st}, nil
+	im := &Image{Meta: meta, root: root, manifest: manifestKey, st: s.st}
+	if meta.Rootfs != nil && (meta.Rootfs.Status == RootfsOK || meta.Rootfs.Status == RootfsPartial) {
+		k, err := s.st.LookupKey(root, RootfsDir)
+		if err != nil {
+			return nil, fmt.Errorf("image: %s in root %s: %w", RootfsDir, root, err)
+		}
+		im.rootfs, im.hasRootfs = k, true
+	}
+	return im, nil
 }
 
 // Delete removes references. By tag it deletes only the tag ref. By digest

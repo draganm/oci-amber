@@ -1,12 +1,15 @@
 package store
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 
+	"github.com/jobs-build/amber-store-core/cborx"
 	"github.com/jobs-build/amber-store-core/fstree"
 	"github.com/jobs-build/amber-store-core/key"
 )
@@ -289,5 +292,99 @@ func TestDirLargeBuildsIndexAndIsDeterministic(t *testing.T) {
 	}
 	if st2.DedupedBytes != st2.LogicalBytes || st2.LogicalBytes != st1.LogicalBytes {
 		t.Errorf("rebuild LogicalBytes/DedupedBytes = %d/%d, want %d/%d", st2.LogicalBytes, st2.DedupedBytes, st1.LogicalBytes, st1.LogicalBytes)
+	}
+}
+
+func TestDirAddEntryTypes(t *testing.T) {
+	s := openWriterStore(t)
+	w := s.NewWriter(context.Background())
+	defer w.Abort()
+	file, err := w.PutBytes([]byte("content"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sub := w.NewDir()
+	subKey, err := sub.Finish()
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := w.NewDir()
+	entries := []fstree.Entry{
+		{Name: []byte("blk"), Mode: TypeBlock | 0o660, Rdev: []uint64{8, 1}},
+		{Name: []byte("chr"), Mode: TypeChar | 0o666, UID: 5, GID: 7, Mtime: 12345, Rdev: []uint64{1, 3}},
+		{Name: []byte("dir"), Mode: TypeDir | 0o700, ContentKey: subKey[:]},
+		{Name: []byte("fifo"), Mode: TypeFIFO | 0o600},
+		{Name: []byte("file"), Mode: TypeReg | 0o4755, UID: 1000, GID: 1000, Mtime: -5, ContentKey: file[:], XattrsIn: cborx.EncodeXattrs(map[string][]byte{"user.k": []byte("v")})},
+		{Name: []byte("link"), Mode: TypeLink | 0o777, LinkTarget: []byte("../file")},
+		{Name: []byte("sock"), Mode: TypeSocket | 0o755},
+	}
+	for _, e := range entries {
+		if err := d.AddEntry(e); err != nil {
+			t.Fatalf("AddEntry(%s): %v", e.Name, err)
+		}
+	}
+	root, err := d.Finish()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range entries {
+		got := lookupEntry(t, s, root, string(want.Name))
+		if got.Mode != want.Mode || got.UID != want.UID || got.GID != want.GID || got.Mtime != want.Mtime ||
+			!bytes.Equal(got.ContentKey, want.ContentKey) || !bytes.Equal(got.LinkTarget, want.LinkTarget) ||
+			!slices.Equal(got.Rdev, want.Rdev) || !bytes.Equal(got.XattrsIn, want.XattrsIn) {
+			t.Fatalf("%s: stored %+v, want %+v", want.Name, got, want)
+		}
+	}
+}
+
+func TestDirAddEntryRejects(t *testing.T) {
+	s := openWriterStore(t)
+	w := s.NewWriter(context.Background())
+	defer w.Abort()
+	file, err := w.PutBytes([]byte("content"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sub := w.NewDir()
+	subKey, err := sub.Finish()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		name string
+		e    fstree.Entry
+	}{
+		{"file without content", fstree.Entry{Name: []byte("a"), Mode: TypeReg | 0o644}},
+		{"file with dir key", fstree.Entry{Name: []byte("a"), Mode: TypeReg | 0o644, ContentKey: subKey[:]}},
+		{"dir with file key", fstree.Entry{Name: []byte("a"), Mode: TypeDir | 0o755, ContentKey: file[:]}},
+		{"file with link target", fstree.Entry{Name: []byte("a"), Mode: TypeReg | 0o644, ContentKey: file[:], LinkTarget: []byte("x")}},
+		{"symlink without target", fstree.Entry{Name: []byte("a"), Mode: TypeLink | 0o777}},
+		{"symlink with content", fstree.Entry{Name: []byte("a"), Mode: TypeLink | 0o777, LinkTarget: []byte("x"), ContentKey: file[:]}},
+		{"char without rdev", fstree.Entry{Name: []byte("a"), Mode: TypeChar | 0o600}},
+		{"block with one rdev", fstree.Entry{Name: []byte("a"), Mode: TypeBlock | 0o600, Rdev: []uint64{1}}},
+		{"fifo with content", fstree.Entry{Name: []byte("a"), Mode: TypeFIFO | 0o600, ContentKey: file[:]}},
+		{"no type bits", fstree.Entry{Name: []byte("a"), Mode: 0o644, ContentKey: file[:]}},
+		{"bad name", fstree.Entry{Name: []byte("a/b"), Mode: TypeReg | 0o644, ContentKey: file[:]}},
+		{"both xattr forms", fstree.Entry{Name: []byte("a"), Mode: TypeReg | 0o644, ContentKey: file[:], XattrsIn: []byte{0xa0}, XattrsKey: file[:]}},
+		{"xattrs key of the wrong type", fstree.Entry{Name: []byte("a"), Mode: TypeReg | 0o644, ContentKey: file[:], XattrsKey: file[:]}},
+		{"malformed xattrs key", fstree.Entry{Name: []byte("a"), Mode: TypeReg | 0o644, ContentKey: file[:], XattrsKey: []byte{1, 2, 3}}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			d := w.NewDir()
+			if err := d.AddEntry(c.e); err == nil {
+				t.Fatalf("AddEntry accepted %+v", c.e)
+			}
+		})
+	}
+	d := w.NewDir()
+	if err := d.AddEntry(fstree.Entry{Name: []byte("b"), Mode: TypeReg | 0o644, ContentKey: file[:]}); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.AddEntry(fstree.Entry{Name: []byte("a"), Mode: TypeReg | 0o644, ContentKey: file[:]}); err == nil {
+		t.Fatal("AddEntry accepted an out-of-order name")
 	}
 }
