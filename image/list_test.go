@@ -178,3 +178,24 @@ func TestTagsAfterDelete(t *testing.T) {
 		t.Fatalf("after deleting the manifest: Tags error = %v, want ErrNotFound", err)
 	}
 }
+
+func TestManifestsListsTaggedAndUntagged(t *testing.T) {
+	e := newListEnv(t)
+	tagged, _ := e.put("library/app", "v1", e.manifest("", nil, map[string]string{"n": "1"}))
+	untagged, _ := e.put("library/app", "", e.manifest("", nil, map[string]string{"n": "2"}))
+	// A nested repository shares the ref prefix "oci/manifest/library/app/".
+	e.put("library/app/sub", "x", e.manifest("", nil, map[string]string{"n": "3"}))
+
+	got, err := e.images.Manifests("library/app")
+	if err != nil {
+		t.Fatalf("Manifests: %v", err)
+	}
+	want := []oci.Digest{tagged.Digest, untagged.Digest}
+	slices.Sort(want)
+	if !slices.Equal(got, want) {
+		t.Fatalf("Manifests = %v, want %v", got, want)
+	}
+	if _, err := e.images.Manifests("nobody/here"); !errors.Is(err, image.ErrNotFound) {
+		t.Fatalf("unknown repository: %v, want ErrNotFound", err)
+	}
+}
