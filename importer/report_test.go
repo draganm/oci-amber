@@ -26,6 +26,13 @@ func TestReportNotWrittenPercent(t *testing.T) {
 	if p := r.NotWrittenPercent(); math.Abs(p-39.3) > 0.05 {
 		t.Fatalf("NotWrittenPercent() = %v, want ~39.3", p)
 	}
+	// An all-present re-import writes a bit of manifest metadata but no
+	// blobs, so Added can exceed Compressed; the percentage must clamp at 0
+	// rather than go negative.
+	r = &Report{Compressed: 1000, Added: 1200}
+	if p := r.NotWrittenPercent(); p != 0 {
+		t.Fatalf("NotWrittenPercent() = %v, want 0 when Added exceeds Compressed", p)
+	}
 }
 
 func TestReportChunksReusedPercent(t *testing.T) {

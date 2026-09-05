@@ -59,12 +59,14 @@ func (r *Report) DedupRatio() (float64, bool) {
 }
 
 // NotWrittenPercent is the share of the compressed bytes that did not
-// reach the pack segments.
+// reach the pack segments. Clamped at 0: metadata overhead (manifests,
+// rootfs trees) can make Added exceed Compressed on an all-present
+// re-import, which would otherwise render as a negative percentage.
 func (r *Report) NotWrittenPercent() float64 {
 	if r.Compressed == 0 {
 		return 0
 	}
-	return 100 * (1 - float64(r.Added)/float64(r.Compressed))
+	return max(0, 100*(1-float64(r.Added)/float64(r.Compressed)))
 }
 
 // ChunksReusedPercent is Deduped over Logical, the registry's

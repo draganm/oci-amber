@@ -26,7 +26,7 @@ func blobSnapshot() importer.Snapshot {
 			{Digest: oci.DigestOfBytes([]byte("d")), Size: 10, State: importer.BlobPresent, Fraction: 1},
 			{Digest: oci.DigestOfBytes([]byte("e")), Size: 10, State: importer.BlobPending},
 		},
-		Counts:   importer.Counts{Pending: 1, InFlight: 2, Done: 1, Present: 1},
+		Counts:   importer.Counts{Pending: 1, InFlight: 2, Done: 1, Present: 1, Raw: 1},
 		Fraction: 0.41,
 		Elapsed:  42 * time.Second,
 		ETA:      2*time.Minute + 10*time.Second,
@@ -39,7 +39,7 @@ func TestRenderViewBlobPhase(t *testing.T) {
 	for _, want := range []string{
 		"Importing busybox.tar → busybox:1.37",
 		"elapsed 0:42",
-		"1 done · 1 already present · 2 in flight · 1 pending",
+		"1 done · 1 already present · 2 in flight · 1 pending · 1 raw",
 		ShortDigest(oci.DigestOfBytes([]byte("a"))) + "  1.8 MiB",
 		"decompose",
 		"52%",

@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"errors"
 	"time"
 
 	"github.com/charmbracelet/bubbles/progress"
@@ -17,6 +18,13 @@ type tickMsg time.Time
 
 // doneMsg says the import returned; the program quits with an empty view.
 type doneMsg struct{}
+
+// TerminalError wraps the error tea.Program.Run returned: the terminal could
+// not be set up, or the renderer failed mid-run. Err is never nil.
+type TerminalError struct{ Err error }
+
+func (e *TerminalError) Error() string { return "terminal: " + e.Err.Error() }
+func (e *TerminalError) Unwrap() error { return e.Err }
 
 // model is the Bubble Tea model: it owns no import state, it renders the
 // tracker's snapshots.
@@ -90,11 +98,16 @@ func Run(tr *importer.Tracker, title string, cancel func(), run func() (*importe
 		results <- result{rep, err}
 		p.Send(doneMsg{})
 	}()
-	if _, err := p.Run(); err != nil {
-		// The terminal failed under us; the import keeps going and its
-		// result still decides the exit status.
+	_, teaErr := p.Run()
+	if teaErr != nil {
+		// The terminal failed under us: cancel the import rather than leave
+		// it running unattended with no way to report its progress or be
+		// told to stop.
 		cancel()
 	}
 	r := <-results
+	if teaErr != nil {
+		return r.rep, errors.Join(&TerminalError{teaErr}, r.err)
+	}
 	return r.rep, r.err
 }

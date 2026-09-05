@@ -301,6 +301,9 @@ func (a *Archive) assignNames(p *Plan, roots []*node, override []string) error {
 		if !ok {
 			return fmt.Errorf("dockerarchive: %s names config %s, which no manifest in %s uses", ManifestFile, d, IndexFile)
 		}
+		if len(is) > 1 {
+			return fmt.Errorf("dockerarchive: RepoTags %v apply to %d images that share config %s; save the images separately or pass --name to a single-image archive", le.RepoTags, len(is), d)
+		}
 		for _, tag := range le.RepoTags {
 			n, ok, err := nameFromRepoTag(tag)
 			if err != nil {

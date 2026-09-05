@@ -64,8 +64,10 @@ func (sp *Spool) Digest() oci.Digest { return sp.digest }
 
 // Open returns a reader positioned at offset 0. For a memory spool it is a
 // *bytes.Reader; for a file spool it is backed by a freshly opened *os.File
-// and implements io.Closer, which the caller must close. Open may be called
-// several times and the readers' ReadAt may be used concurrently.
+// and implements io.Closer, which the caller must close; for a section
+// spool it is an *io.SectionReader over the caller's reader, with no Close.
+// Open may be called several times and the readers' ReadAt may be used
+// concurrently.
 //
 // A file spool's reader stays valid even if its backing path is unlinked
 // after Open returns — by Session.close (a cancel, a finalize, or a sweep)

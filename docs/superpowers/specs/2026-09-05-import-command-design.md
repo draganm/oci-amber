@@ -43,8 +43,13 @@ Decisions taken during implementation (2026-09-05):
 - Two `index.json` entries resolving to the same image
   (`docker save img:a img:b`) produce one plan entry carrying both
   names.
-- The terminal check uses the stdout file mode (character device), so
-  no dependency beyond the three Charm modules was added.
+- The terminal check uses `github.com/charmbracelet/x/term.IsTerminal`,
+  already in the module graph through Bubble Tea and promoted from
+  indirect to direct, so no new dependency was added.
+- `tui.Run` returns a terminal failure as `*tui.TerminalError` joined with
+  the import's result; the import is cancelled when the terminal dies.
+- RepoTags that apply to several distinct images are rejected
+  (ambiguous); index.json annotations are a follow-up.
 
 ## Goals
 
@@ -387,7 +392,7 @@ Imported busybox.tar in 42s
   busybox:1.37   sha256:3f0a…9c2e   index, 1 platform + 1 attestation   rootfs ok, 1,204 entries
 
 Blobs           8 processed: 6 stored (5 prism, 1 raw: not-tar), 2 already present
-Compressed      1.9 MiB     1,900,727 bytes   blob and manifest bytes as they are in the archive
+Compressed      1.8 MiB     1,900,727 bytes   blob and manifest bytes as they are in the archive
 Uncompressed    4.2 MiB     4,388,352 bytes   after decompression; raw blobs counted as is
 Added to CAS    1.1 MiB     1,153,024 bytes   appended to pack segments, manifests and rootfs tree included
 Dedup ratio     1.65x       compressed bytes ÷ bytes added to CAS   (39.3% not written)
@@ -450,8 +455,9 @@ the exact number with thousands separators.
 - README: an "Importing a docker save archive" section.
 - New dependencies: `github.com/charmbracelet/bubbletea`,
   `github.com/charmbracelet/bubbles`, `github.com/charmbracelet/lipgloss`.
-  The terminal check uses the stdout file mode (`os.ModeCharDevice`), so
-  it adds no dependency of its own.
+  The terminal check uses `github.com/charmbracelet/x/term.IsTerminal`,
+  already in the module graph through Bubble Tea and promoted from
+  indirect to direct, so it adds no dependency of its own.
 
 ## Testing
 

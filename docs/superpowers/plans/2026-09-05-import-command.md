@@ -6,7 +6,7 @@
 
 **Architecture:** `dockerarchive` reads the tar in place and turns it into a plan (blobs, manifests with a pruned index, names). `importer` drives `blob.Store.Put` and `image.Store.Put` from the plan, fed by a new `blob.Observer` hook, and keeps a `Tracker` whose `Snapshot` the `tui` package renders. `cmd/oci-amber` gains the `import` subcommand.
 
-**Tech Stack:** Go 1.26, urfave/cli v2, charmbracelet/bubbletea v1.3.10, bubbles v1.0.0, lipgloss v1.1.0, golang.org/x/term.
+**Tech Stack:** Go 1.26, urfave/cli v2, charmbracelet/bubbletea v1.3.10, bubbles v1.0.0, lipgloss v1.1.0, charmbracelet/x/term (transitive).
 
 **Spec:** `docs/superpowers/specs/2026-09-05-import-command-design.md`
 

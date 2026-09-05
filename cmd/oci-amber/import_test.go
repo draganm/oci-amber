@@ -5,6 +5,7 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"reflect"
 	"runtime"
@@ -174,5 +175,41 @@ func TestRunImportFromStdin(t *testing.T) {
 	entries, _ := filepath.Glob(filepath.Join(tmp, "store", "work", "oci-amber", "import-*.tar"))
 	if len(entries) != 0 {
 		t.Errorf("stdin copy left behind: %v", entries)
+	}
+}
+
+// TestRunImportRemovesStaleSpoolFiles sweeps a spooled-stdin file left
+// behind by a killed earlier run: nothing reads it again, and it would
+// otherwise accumulate in the work directory across restarts.
+func TestRunImportRemovesStaleSpoolFiles(t *testing.T) {
+	b := archivetest.New()
+	config := []byte(`{"architecture":"amd64","os":"linux"}`)
+	img := b.AddImage(config, nil, &oci.Platform{OS: "linux", Architecture: "amd64"}, nil)
+	b.Top(img)
+	b.Legacy(archivetest.LegacyEntry{Config: oci.DigestOfBytes(config), RepoTags: []string{"stale:1"}})
+	tmp := t.TempDir()
+	path, err := b.WriteFile(tmp, "image.tar")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ownDir := filepath.Join(tmp, "store", "work", "oci-amber")
+	if err := os.MkdirAll(ownDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	stale := filepath.Join(ownDir, "import-99999.tar")
+	if err := os.WriteFile(stale, []byte("leftover from a killed run"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	cfg := importConfig{
+		Store: filepath.Join(tmp, "store"), MaxInMemory: 8 << 20, AnalyzeParallelism: 1, AnalyzeTimeout: time.Minute,
+		MaxConcurrentFinalize: 1, VerifyRoundTrip: true, LogLevel: slog.LevelWarn,
+		Archive: path, Progress: "plain", Stdout: &stdout, Stderr: &stderr,
+	}
+	if err := runImport(context.Background(), cfg); err != nil {
+		t.Fatalf("runImport: %v\n%s", err, stderr.String())
+	}
+	if _, err := os.Stat(stale); !os.IsNotExist(err) {
+		t.Errorf("stale spool file survived the run: %v", err)
 	}
 }

@@ -167,6 +167,24 @@ func runImport(ctx context.Context, cfg importConfig) error {
 		}
 	}()
 
+	// A killed earlier run can leave its spooled stdin behind; nothing
+	// reads it again, so sweep it before it accumulates across runs.
+	if stale, err := filepath.Glob(filepath.Join(ownDir, "import-*.tar")); err == nil {
+		for _, f := range stale {
+			if err := os.Remove(f); err != nil {
+				log.Debug("removing stale spooled archive", "path", f, "error", err)
+			}
+		}
+	}
+
+	// The store is opened before spooling stdin, so a store locked by a
+	// running serve is reported before a multi-GB stream is copied.
+	st, err := store.Open(cfg.Store, store.Options{Logger: log})
+	if err != nil {
+		return fmt.Errorf("opening store %s: %w", cfg.Store, err)
+	}
+	defer st.Close()
+
 	path := cfg.Archive
 	if path == "-" {
 		tmp := filepath.Join(ownDir, fmt.Sprintf("import-%d.tar", os.Getpid()))
@@ -181,12 +199,6 @@ func runImport(ctx context.Context, cfg importConfig) error {
 		return fmt.Errorf("opening archive: %w", err)
 	}
 	defer arch.Close()
-
-	st, err := store.Open(cfg.Store, store.Options{Logger: log})
-	if err != nil {
-		return fmt.Errorf("opening store %s: %w", cfg.Store, err)
-	}
-	defer st.Close()
 
 	tr := importer.NewTracker(importer.TrackerOptions{Verify: cfg.VerifyRoundTrip})
 	blobs, err := blob.New(st, blob.Options{
@@ -227,6 +239,10 @@ func runImport(ctx context.Context, cfg importConfig) error {
 		rep, err = tui.RunPlain(stderr, tr, plainStatusInterval, run)
 	}
 	if err != nil {
+		var terr *tui.TerminalError
+		if errors.As(err, &terr) {
+			return err
+		}
 		if errors.Is(err, context.Canceled) {
 			return errors.New("import cancelled")
 		}

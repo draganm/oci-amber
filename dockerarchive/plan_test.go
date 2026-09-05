@@ -171,6 +171,38 @@ func TestPlanSameImageListedTwice(t *testing.T) {
 	}
 }
 
+func TestPlanAmbiguousRepoTagsIsAnError(t *testing.T) {
+	// Two distinct top-level indexes (distinguished by an annotation, since
+	// otherwise pruning the absent platform out of each would leave them
+	// byte-identical) share the same present platform manifest, so its
+	// config is reachable from both roots. manifest.json's one RepoTags
+	// entry then cannot say which root it names.
+	b := archivetest.New()
+	config := []byte(`{"architecture":"amd64","os":"linux","rootfs":{"type":"layers","diff_ids":[]}}`)
+	layer := []byte("gzip layer bytes")
+	img := b.AddImage(config, []archivetest.Layer{{MediaType: gzipLayer, Data: layer}}, &oci.Platform{OS: "linux", Architecture: "amd64"}, nil)
+	idx1 := b.AddIndex([]oci.Descriptor{
+		img,
+		archivetest.AbsentManifest(oci.Platform{OS: "linux", Architecture: "arm64", Variant: "v8"}),
+	}, map[string]string{"idx": "1"})
+	idx2 := b.AddIndex([]oci.Descriptor{
+		img,
+		archivetest.AbsentManifest(oci.Platform{OS: "linux", Architecture: "arm", Variant: "v7"}),
+	}, map[string]string{"idx": "2"})
+	b.Top(idx1, idx2)
+	b.Legacy(archivetest.LegacyEntry{Config: oci.DigestOfBytes(config), RepoTags: []string{"busybox:1.37"}, Layers: []oci.Digest{oci.DigestOfBytes(layer)}})
+	a := openBuilder(t, b)
+	if _, err := a.Plan(PlanOptions{}); err == nil || !strings.Contains(err.Error(), "share config") {
+		t.Fatalf("err = %v, want an ambiguous RepoTags error", err)
+	}
+	// --name does not rescue this: it only applies to a single-image
+	// archive, and this archive holds two roots. The fix is to save the
+	// images separately.
+	if _, err := a.Plan(PlanOptions{Names: []string{"mirror/busybox:1.37"}}); err == nil || !strings.Contains(err.Error(), "single-image") {
+		t.Fatalf("--name on a two-root archive: %v, want the single-image error", err)
+	}
+}
+
 func TestPlanMultiImageArchive(t *testing.T) {
 	b := archivetest.New()
 	cfgA, cfgB := []byte(`{"os":"linux","a":1}`), []byte(`{"os":"linux","b":1}`)

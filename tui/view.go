@@ -37,7 +37,11 @@ func RenderView(s importer.Snapshot, title string, width int, bar func(float64) 
 		fmt.Fprintf(&b, "  checking archive  %s  %3.0f%%\n", bar(s.Checked), s.Checked*100)
 	case importer.PhaseBlobs:
 		c := s.Counts
-		fmt.Fprintf(&b, "  blobs  %s\n", styleDim.Render(fmt.Sprintf("%d done · %d already present · %d in flight · %d pending", c.Done, c.Present, c.InFlight, c.Pending)))
+		counts := fmt.Sprintf("%d done · %d already present · %d in flight · %d pending", c.Done, c.Present, c.InFlight, c.Pending)
+		if c.Raw > 0 {
+			counts += fmt.Sprintf(" · %d raw", c.Raw)
+		}
+		fmt.Fprintf(&b, "  blobs  %s\n", styleDim.Render(counts))
 		for _, r := range s.Blobs {
 			if r.State != importer.BlobInFlight {
 				continue
