@@ -85,8 +85,8 @@ github.com/golang/snappy v0.0.5-0.20231225225746-43d5d4cd4e0e h1:4bw4WeyTYPp0sma
 github.com/golang/snappy v0.0.5-0.20231225225746-43d5d4cd4e0e/go.mod h1:/XxbfmMg8lxefKM7IXC3fBNl/7bRcc72aCRzEWrmP2Q=
 github.com/google/go-cmp v0.7.0 h1:wk8382ETsv4JYUZwIsn6YpYiWiBsYLSJiTsyBybVuN8=
 github.com/google/go-cmp v0.7.0/go.mod h1:pXiqmnSA92OHEEa9HXL2W4E7lf9JzCmGVUdgjX3N/iU=
-github.com/jobs-build/amber-store-core v0.0.3-0.20260905205843-57535b9fda46 h1:6zeF3NOSefV2ejun9n8lWmK8EXhE0T08uD+YZyBJtEc=
-github.com/jobs-build/amber-store-core v0.0.3-0.20260905205843-57535b9fda46/go.mod h1:6W8t/OqZ5VKDiMOHVvDflgiOZ3BiSRqcYKDIyJgHn6k=
+github.com/jobs-build/amber-store-core v0.0.3-0.20260905223831-9f3c60ea3306 h1:bES/ltdhmehA2h5pdaenvvdtVK7q2zkDDwr4UVhLCME=
+github.com/jobs-build/amber-store-core v0.0.3-0.20260905223831-9f3c60ea3306/go.mod h1:6W8t/OqZ5VKDiMOHVvDflgiOZ3BiSRqcYKDIyJgHn6k=
 github.com/kisielk/errcheck v1.5.0/go.mod h1:pFxgyoBC7bSaBwPgfKdkLd5X25qrDl4LWUI2bnpBCr8=
 github.com/kisielk/gotool v1.0.0/go.mod h1:XhKaO+MFFWcvkIS/tQcRk01m1F5IRFswLeQ+oQHNcck=
 github.com/klauspost/compress v1.20.0 h1:a3C1ke2ohxFymNlb2HWAHjDeKCI90scRskErZkR0ezA=
