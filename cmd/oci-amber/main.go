@@ -1,5 +1,6 @@
 // Command oci-amber runs an OCI distribution registry whose storage is an
-// embedded amber store. The only subcommand is `serve`.
+// embedded amber store. The `serve` subcommand runs the registry; `import`
+// stores a `docker image save` archive without running it.
 package main
 
 import (
@@ -83,7 +84,7 @@ func main() {
 		cfg.Stop = stop
 		return run(ctx, cfg)
 	}
-	if err := newApp(serve).RunContext(ctx, os.Args); err != nil {
+	if err := newApp(serve, runImport).RunContext(ctx, os.Args); err != nil {
 		fmt.Fprintln(os.Stderr, "oci-amber:", err)
 		os.Exit(1)
 	}
@@ -99,10 +100,11 @@ func envVar(flag string) []string {
 	return []string{envPrefix + strings.ToUpper(strings.ReplaceAll(flag, "-", "_"))}
 }
 
-// newApp builds the command line application. serve is what the `serve`
-// subcommand runs once its flags have been validated; main passes run and
-// tests pass a function that captures the config.
-func newApp(serve func(ctx context.Context, cfg config) error) *cli.App {
+// newApp builds the command line application. serve and imp are what the
+// `serve` and `import` subcommands run once their flags have been
+// validated; main passes run and runImport, tests pass functions that
+// capture the config.
+func newApp(serve func(ctx context.Context, cfg config) error, imp func(ctx context.Context, cfg importConfig) error) *cli.App {
 	return &cli.App{
 		Name:            "oci-amber",
 		Usage:           "OCI distribution registry backed by an embedded amber store",
@@ -118,26 +120,46 @@ func newApp(serve func(ctx context.Context, cfg config) error) *cli.App {
 				}
 				return serve(c.Context, cfg)
 			},
+		}, {
+			Name:      "import",
+			Usage:     "store a `docker image save` archive without running the registry",
+			ArgsUsage: "<archive.tar | ->",
+			Flags:     importFlags(),
+			Action: func(c *cli.Context) error {
+				cfg, err := importConfigFromCLI(c)
+				if err != nil {
+					return err
+				}
+				return imp(c.Context, cfg)
+			},
 		}},
+	}
+}
+
+// storeFlags is the flag table `serve` and `import` share: everything
+// about the store and the blob pipeline. Every flag can also be set
+// through OCI_AMBER_<FLAG>.
+func storeFlags() []cli.Flag {
+	return []cli.Flag{
+		&cli.StringFlag{Name: "store", Usage: "store `directory` (required)", EnvVars: envVar("store"), Required: true},
+		&cli.StringFlag{Name: "work-dir", Usage: "`directory` holding <work-dir>/oci-amber/{uploads,spool}, whose contents are deleted at startup; nothing else under it is touched (default: <store>/work)", EnvVars: envVar("work-dir")},
+		&cli.StringFlag{Name: "max-in-memory", Value: defaultMaxInMemory, Usage: "upload spool and zrecipe spool threshold (`size` with unit B, KiB, MiB, GiB, KB, MB or GB)", EnvVars: envVar("max-in-memory")},
+		&cli.IntFlag{Name: "analyze-parallelism", Value: defaultAnalyzeParallelism, Usage: "zrecipe candidate `workers` per blob", EnvVars: envVar("analyze-parallelism")},
+		&cli.DurationFlag{Name: "analyze-timeout", Value: defaultAnalyzeTimeout, Usage: "per-blob analyze `deadline` before raw fallback", EnvVars: envVar("analyze-timeout")},
+		&cli.IntFlag{Name: "max-concurrent-finalize", Value: defaultMaxConcurrentFinalize(), Usage: "concurrent blob finalizations (`count`, default NumCPU/2, minimum 1)", EnvVars: envVar("max-concurrent-finalize")},
+		&cli.BoolFlag{Name: "verify-roundtrip", Value: true, Usage: "run the pull pipeline over every prism before publishing it", EnvVars: envVar("verify-roundtrip")},
+		&cli.StringFlag{Name: "log-level", Value: defaultLogLevel, Usage: "log `level`: debug, info, warn or error", EnvVars: envVar("log-level")},
 	}
 }
 
 // serveFlags is the flag table from the spec's Configuration section. Every
 // flag can also be set through OCI_AMBER_<FLAG>.
 func serveFlags() []cli.Flag {
-	return []cli.Flag{
-		&cli.StringFlag{Name: "store", Usage: "store `directory` (required)", EnvVars: envVar("store"), Required: true},
-		&cli.StringFlag{Name: "work-dir", Usage: "`directory` holding <work-dir>/oci-amber/{uploads,spool}, whose contents are deleted at startup; nothing else under it is touched (default: <store>/work)", EnvVars: envVar("work-dir")},
+	return append(storeFlags(),
 		&cli.StringFlag{Name: "listen", Value: defaultListen, Usage: "listen `address`", EnvVars: envVar("listen")},
-		&cli.StringFlag{Name: "max-in-memory", Value: defaultMaxInMemory, Usage: "upload spool and zrecipe spool threshold (`size` with unit B, KiB, MiB, GiB, KB, MB or GB)", EnvVars: envVar("max-in-memory")},
-		&cli.IntFlag{Name: "analyze-parallelism", Value: defaultAnalyzeParallelism, Usage: "zrecipe candidate `workers` per blob", EnvVars: envVar("analyze-parallelism")},
-		&cli.DurationFlag{Name: "analyze-timeout", Value: defaultAnalyzeTimeout, Usage: "per-blob analyze `deadline` before raw fallback", EnvVars: envVar("analyze-timeout")},
-		&cli.IntFlag{Name: "max-concurrent-finalize", Value: defaultMaxConcurrentFinalize(), Usage: "concurrent blob finalizations (`count`, default NumCPU/2, minimum 1)", EnvVars: envVar("max-concurrent-finalize")},
-		&cli.BoolFlag{Name: "verify-roundtrip", Value: true, Usage: "run the pull pipeline over every prism before publishing it", EnvVars: envVar("verify-roundtrip")},
 		&cli.DurationFlag{Name: "upload-timeout", Value: defaultUploadTimeout, Usage: "idle upload session expiry and recent-uploads table TTL (`duration`)", EnvVars: envVar("upload-timeout")},
 		&cli.DurationFlag{Name: "gc-interval", Value: 0, Usage: "background GC cycle `interval`, 0 disables", EnvVars: envVar("gc-interval")},
-		&cli.StringFlag{Name: "log-level", Value: defaultLogLevel, Usage: "log `level`: debug, info, warn or error", EnvVars: envVar("log-level")},
-	}
+	)
 }
 
 // configFromCLI reads and validates the serve flags.
