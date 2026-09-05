@@ -3,6 +3,7 @@ package importer
 import (
 	"context"
 	"fmt"
+	"slices"
 	"sync"
 	"time"
 
@@ -12,6 +13,12 @@ import (
 	"github.com/draganm/oci-amber/oci"
 	"github.com/draganm/oci-amber/upload"
 )
+
+// putHook is a test seam: when non-nil, putBlob calls it right after
+// marking the blob in flight and, on a non-nil error, fails the blob
+// without ever calling blob.Store.Put — the way blob/prism.go's
+// roundTripCheck lets tests force a failure. Nil in production.
+var putHook func(ctx context.Context, pb dockerarchive.PlanBlob) error
 
 // Options configure an Importer. Workers is how many blobs are finalized
 // at once; the command passes --max-concurrent-finalize.
@@ -53,6 +60,8 @@ func (im *Importer) Run(ctx context.Context) (*Report, error) {
 	return rep, nil
 }
 
+// run performs the three phases of an import in order: checking blob
+// digests, storing blobs, and publishing manifests.
 func (im *Importer) run(ctx context.Context) (*Report, error) {
 	if err := im.check(ctx); err != nil {
 		return nil, err
@@ -73,7 +82,7 @@ func (im *Importer) check(ctx context.Context) error {
 		}
 		err := im.arch.Verify(ctx, pb.Digest, func(n int64) { im.tr.Checked(done + n) })
 		if err != nil {
-			return err
+			return fmt.Errorf("importer: checking %s: %w", pb.Digest, err)
 		}
 		done += pb.Size
 		im.tr.Checked(done)
@@ -149,8 +158,16 @@ feed:
 	return metas, nil
 }
 
+// putBlob stores one blob: it marks the digest in flight, then (absent a
+// test hook forcing a failure) opens its section of the archive and puts
+// it through the blob store.
 func (im *Importer) putBlob(ctx context.Context, pb dockerarchive.PlanBlob) (*blob.Meta, error) {
 	im.tr.Start(pb.Digest)
+	if putHook != nil {
+		if err := putHook(ctx, pb); err != nil {
+			return nil, fmt.Errorf("importer: storing %s: %w", pb.Digest, err)
+		}
+	}
 	sec, err := im.arch.Section(pb.Digest)
 	if err != nil {
 		return nil, err
@@ -178,7 +195,10 @@ func (im *Importer) publish(ctx context.Context, metas map[oci.Digest]*blob.Meta
 		haveStats := false
 		for ri, repo := range reposOf(e.Names) {
 			for _, d := range e.Manifests {
-				pm := byDigest[d]
+				pm, ok := byDigest[d]
+				if !ok {
+					return nil, fmt.Errorf("importer: plan names manifest %s but does not carry it", d)
+				}
 				for i, ref := range refsFor(e, d, repo) {
 					im.tr.ManifestStart(d)
 					meta, err := im.images.Put(ctx, repo, ref, pm.MediaType, pm.Body)
@@ -209,7 +229,7 @@ func (im *Importer) publish(ctx context.Context, metas map[oci.Digest]*blob.Meta
 func reposOf(names []dockerarchive.Name) []string {
 	var repos []string
 	for _, n := range names {
-		if !contains(repos, n.Repo) {
+		if !slices.Contains(repos, n.Repo) {
 			repos = append(repos, n.Repo)
 		}
 	}
@@ -276,13 +296,4 @@ func (im *Importer) account(rep *Report, metas map[oci.Digest]*blob.Meta) {
 		rep.Compressed += int64(len(pm.Body))
 		rep.Uncompressed += int64(len(pm.Body))
 	}
-}
-
-func contains(list []string, s string) bool {
-	for _, x := range list {
-		if x == s {
-			return true
-		}
-	}
-	return false
 }

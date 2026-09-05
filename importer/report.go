@@ -26,7 +26,7 @@ type EntryReport struct {
 
 // BlobCounts summarize what happened to the blobs.
 type BlobCounts struct {
-	Processed  int // not present at planning time
+	Processed  int // stored by this run: not present at planning time and not a dedup hit during the run
 	Prism      int
 	Raw        int
 	Present    int // present at planning time plus dedup hits during the run

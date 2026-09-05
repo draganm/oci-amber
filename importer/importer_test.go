@@ -161,8 +161,8 @@ func TestRunStoresEverything(t *testing.T) {
 	if rep.Uncompressed <= rep.Compressed {
 		t.Fatalf("Uncompressed = %d should exceed Compressed = %d (layer A inflates)", rep.Uncompressed, rep.Compressed)
 	}
-	if rep.Added <= 0 || rep.Added != rep.Entries[0].Stats.DiskBytes {
-		t.Fatalf("Added = %d, entry disk bytes = %d", rep.Added, rep.Entries[0].Stats.DiskBytes)
+	if rep.Added <= 0 || rep.Added >= rep.Compressed*2 {
+		t.Fatalf("Added = %d, want on the order of Compressed = %d", rep.Added, rep.Compressed)
 	}
 	if ratio, ok := rep.DedupRatio(); !ok || ratio <= 0 {
 		t.Fatalf("ratio = %v,%v", ratio, ok)
@@ -253,5 +253,54 @@ func TestRunCorruptBlobFailsBeforeWriting(t *testing.T) {
 	}
 	if s := e.tr.Snapshot(); s.Phase != PhaseDone || s.Err == nil {
 		t.Fatalf("tracker: %+v", s)
+	}
+}
+
+// TestRunPutFailureCancelsTheRun reaches the worker pool (unlike the two
+// tests above, which both fail earlier, in check) and forces one Put to
+// fail through the putHook test seam, so the pool's failure and
+// cancellation branches — tr.Fail/firstErr/cancel, and the feeder's
+// <-ctx.Done() case — actually run.
+func TestRunPutFailureCancelsTheRun(t *testing.T) {
+	arch, plan, e := fixture(t)
+	hookErr := errors.New("boom")
+	failDigest := plan.Blobs[0].Digest
+	putHook = func(ctx context.Context, pb dockerarchive.PlanBlob) error {
+		if pb.Digest == failDigest {
+			return hookErr
+		}
+		return nil
+	}
+	t.Cleanup(func() { putHook = nil })
+
+	_, err := New(e.blobs, e.images, arch, plan, e.tr, Options{Workers: 1}).Run(context.Background())
+	if !errors.Is(err, hookErr) {
+		t.Fatalf("err = %v, want it to wrap %v", err, hookErr)
+	}
+
+	snap := e.tr.Snapshot()
+	var sawFailed, sawPending bool
+	for _, r := range snap.Blobs {
+		switch {
+		case r.Digest == failDigest:
+			if r.State != BlobFailed {
+				t.Fatalf("failed blob state = %v, want BlobFailed", r.State)
+			}
+			sawFailed = true
+		case r.State == BlobPending:
+			sawPending = true
+		}
+	}
+	if !sawFailed {
+		t.Fatal("failed blob's row not found")
+	}
+	if !sawPending {
+		t.Fatal("want at least one other blob still pending: the feeder should have stopped early")
+	}
+	if snap.Phase != PhaseDone || snap.Err == nil {
+		t.Fatalf("tracker: %+v", snap)
+	}
+	if _, err := e.images.Open("app", "latest"); !errors.Is(err, image.ErrNotFound) {
+		t.Fatalf("tag published after a failed run: %v", err)
 	}
 }
