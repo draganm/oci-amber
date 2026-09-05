@@ -126,11 +126,13 @@ One PR against main of `jobs-build/amber-store-core`:
   object with both `Data` and `Record` set, or a record whose key
   differs from `Object.Key`, fails the run with an error that wraps
   `amberpack.ErrCorrupt`.
-- `amberpack.Reader` gains `Records() iter.Seq2[[]byte, error]`: the
-  records of the stream, each validated exactly as `All` validates them
-  (framing, CRC, canonical key, size bound) but not decoded. Like
-  `All`, it may be called once per Reader. It is the read-side
-  counterpart of `Writer.AddRecord`.
+- `amberpack.Reader` gains `Records() iter.Seq2[RawRecord, error]`,
+  where `RawRecord` is a record's parsed header (`Record`) with its
+  complete bytes: the records of the stream, each validated exactly as
+  `All` validates them (framing, CRC, canonical key, size bound) but not
+  decoded, so the consumer has the key and `ulen` without parsing again.
+  `All` is rebuilt on it. Like `All`, it may be called once per Reader.
+  It is the read-side counterpart of `Writer.AddRecord`.
 
 During development oci-amber's `go.mod` carries a `replace` to the local
 checkout at `~/jobs-build/amber-store-core`; the final oci-amber PR pins
@@ -202,9 +204,11 @@ case; `finalizePrism` takes it instead of re-opening the spool.
 ## Progress
 
 `StageDecompose` is renamed `StageCommit` and reported while the pack is
-inserted. Its progress is the number of pack bytes read so far; the
-tracker clamps it at the blob's compressed size, so the bar is
-approximate but never runs backwards. Analyze's progress is unchanged:
+inserted. Its progress is the number of pack bytes read so far, scaled
+to the blob's compressed size (the pack's length is known before the
+insert starts) and reported once more as the size itself when the insert
+is done, so the bar is smooth, never runs backwards and ends where the
+other stages end. Analyze's progress is unchanged:
 the spool's sequential read position, which reaches the size when the
 inflate is done and holds during the search ("searching…"). The
 tracker's stage weights are unchanged, commit taking decompose's share;
