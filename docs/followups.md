@@ -153,6 +153,12 @@ Measured on an M4 Pro with real Docker Hub layers. For a 61 MiB go-flate layer (
   chunks already in the store at staging time (needs the collector's
   write barrier around the staging window), and the pack format making a
   staged blob transferable to a remote store.
+- Measured 2026-09-05 after the speculative decompose, `oci-amber import`
+  of `dmilhdef/lhh:82` (arm64), fresh store each time: sha256:54a144adda00
+  (26.9 MiB, gzip, go-flate) 3.95 s before, 3.62 s after; sha256:39a945af8df2
+  (28.4 MiB, gzip, zlib) 15.06 s before, 14.56 s after; total import 15.9 s
+  to 15.5 s. Remaining per-layer cost is the search and the round-trip
+  recompression.
 - Pass two overhead: a CPU profile of `ingestPrism` alone shows 1.9 s of wall time for under 0.5 s of hashing, chunking and zstd; the rest is one `WriteAt` syscall per object in amber-store-core's `appendLocked` and goroutine wakeups on the object channels and the append mutex among the GOMAXPROCS/2 writers. Batching appends belongs in amber-store-core; in this repo `emitBuffer` (8 objects, about 80 KiB with 10 KiB chunks) and `writers()` are worth tuning, and fewer writers may well be faster.
 - Search parallelism buys little: with 838 gzip candidates a non-reproducible 228 MiB layer costs 2.6 s at `--analyze-parallelism 1` and 1.35 s at 8, because the comparison aborts at the first divergent byte. Leave the default at 2.
 - Rootfs build: 1.2 s for 17.6k entries (0.4 s for 7.4k), mostly one `LookupKey` per regular file in `parseLayer`. Walking the prism's `blobs/` directory once in order, or parsing layers concurrently before applying them in order, would cut it.
