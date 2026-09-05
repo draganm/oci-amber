@@ -27,12 +27,20 @@ const (
 // decreases within a stage. In analyze it is the spool's sequential read
 // position, which reaches the size when pass one is done and then holds
 // while the engine search reads through ReadAt; in commit it is the staged
-// pack's bytes read so far, scaled to the size; in verify the bytes recompressed so far; in raw
-// the bytes stored so far. A dedup hit reports nothing. Methods are called
-// from the goroutines running Put, concurrently for different digests.
+// pack's bytes read so far, scaled to the size; in verify the
+// bytes recompressed so far; in raw the bytes stored so far. A dedup
+// hit reports nothing. Methods are called from the goroutines running
+// Put, concurrently for different digests.
 type Observer interface {
 	BlobStage(d oci.Digest, s Stage)
 	BlobProgress(d oci.Digest, n int64)
+}
+
+// observeStage reports a stage transition when an observer is configured.
+func (b *Store) observeStage(d oci.Digest, s Stage) {
+	if b.opts.Observer != nil {
+		b.opts.Observer.BlobStage(d, s)
+	}
 }
 
 // observeProgress reports n bytes of d handled in the current stage when
@@ -40,13 +48,6 @@ type Observer interface {
 func (b *Store) observeProgress(d oci.Digest, n int64) {
 	if b.opts.Observer != nil {
 		b.opts.Observer.BlobProgress(d, n)
-	}
-}
-
-// observeStage reports a stage transition when an observer is configured.
-func (b *Store) observeStage(d oci.Digest, s Stage) {
-	if b.opts.Observer != nil {
-		b.opts.Observer.BlobStage(d, s)
 	}
 }
 
