@@ -449,3 +449,19 @@ func TestParseManifestKeepsPlatform(t *testing.T) {
 		t.Fatal("a child without a platform must have a nil Platform")
 	}
 }
+
+func TestDescriptorIsAttestation(t *testing.T) {
+	att := Descriptor{Annotations: map[string]string{"vnd.docker.reference.type": "attestation-manifest", "vnd.docker.reference.digest": "sha256:0"}}
+	if !att.IsAttestation() {
+		t.Error("annotated descriptor must be an attestation")
+	}
+	for _, d := range []Descriptor{
+		{},
+		{Platform: &Platform{OS: "unknown", Architecture: "unknown"}},
+		{Annotations: map[string]string{"vnd.docker.reference.type": "other"}},
+	} {
+		if d.IsAttestation() {
+			t.Errorf("%+v must not be an attestation", d)
+		}
+	}
+}

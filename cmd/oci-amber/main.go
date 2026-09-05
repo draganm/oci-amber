@@ -1,7 +1,8 @@
 // Command oci-amber runs an OCI distribution registry whose storage is an
 // embedded amber store. The `serve` subcommand runs the registry, `import`
-// stores a `docker image save` archive without running it, and `browse`
-// walks a store in the terminal.
+// stores a `docker image save` archive without running it, `save` writes
+// one, `ls` lists a store's images and `browse` walks a store in the
+// terminal.
 package main
 
 import (
@@ -81,11 +82,17 @@ type config struct {
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	serve := func(ctx context.Context, cfg config) error {
-		cfg.Stop = stop
-		return run(ctx, cfg)
+	cmds := commands{
+		Serve: func(ctx context.Context, cfg config) error {
+			cfg.Stop = stop
+			return run(ctx, cfg)
+		},
+		Import: runImport,
+		Browse: runBrowse,
+		Ls:     runLs,
+		Save:   runSave,
 	}
-	if err := newApp(serve, runImport, runBrowse).RunContext(ctx, os.Args); err != nil {
+	if err := newApp(cmds).RunContext(ctx, os.Args); err != nil {
 		fmt.Fprintln(os.Stderr, "oci-amber:", err)
 		os.Exit(1)
 	}
@@ -101,11 +108,37 @@ func envVar(flag string) []string {
 	return []string{envPrefix + strings.ToUpper(strings.ReplaceAll(flag, "-", "_"))}
 }
 
-// newApp builds the command line application. serve, imp and brw are what
-// the `serve`, `import` and `browse` subcommands run once their flags have
-// been validated; main passes run, runImport and runBrowse, tests pass
-// functions that capture the config.
-func newApp(serve func(ctx context.Context, cfg config) error, imp func(ctx context.Context, cfg importConfig) error, brw func(ctx context.Context, cfg browseConfig) error) *cli.App {
+// commands is what each subcommand runs once its flags have been
+// validated. main wires the real functions; tests wire ones that capture
+// the config. A nil entry is a no-op.
+type commands struct {
+	Serve  func(ctx context.Context, cfg config) error
+	Import func(ctx context.Context, cfg importConfig) error
+	Browse func(ctx context.Context, cfg browseConfig) error
+	Ls     func(ctx context.Context, cfg lsConfig) error
+	Save   func(ctx context.Context, cfg saveConfig) error
+}
+
+// newApp builds the command line application over cmds.
+func newApp(cmds commands) *cli.App {
+	serve, imp, brw := cmds.Serve, cmds.Import, cmds.Browse
+	if serve == nil {
+		serve = func(context.Context, config) error { return nil }
+	}
+	if imp == nil {
+		imp = func(context.Context, importConfig) error { return nil }
+	}
+	if brw == nil {
+		brw = func(context.Context, browseConfig) error { return nil }
+	}
+	ls := cmds.Ls
+	if ls == nil {
+		ls = func(context.Context, lsConfig) error { return nil }
+	}
+	save := cmds.Save
+	if save == nil {
+		save = func(context.Context, saveConfig) error { return nil }
+	}
 	return &cli.App{
 		Name:            "oci-amber",
 		Usage:           "OCI distribution registry backed by an embedded amber store",
@@ -144,6 +177,30 @@ func newApp(serve func(ctx context.Context, cfg config) error, imp func(ctx cont
 					return err
 				}
 				return brw(c.Context, cfg)
+			},
+		}, {
+			Name:      "ls",
+			Usage:     "list the images in a store",
+			ArgsUsage: "[repo]",
+			Flags:     lsFlags(),
+			Action: func(c *cli.Context) error {
+				cfg, err := lsConfigFromCLI(c)
+				if err != nil {
+					return err
+				}
+				return ls(c.Context, cfg)
+			},
+		}, {
+			Name:      "save",
+			Usage:     "write images to a `docker image save` archive",
+			ArgsUsage: "<repo[:tag|@digest]>...",
+			Flags:     saveFlags(),
+			Action: func(c *cli.Context) error {
+				cfg, err := saveConfigFromCLI(c)
+				if err != nil {
+					return err
+				}
+				return save(c.Context, cfg)
 			},
 		}},
 	}

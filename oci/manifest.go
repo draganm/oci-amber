@@ -32,6 +32,20 @@ type Descriptor struct {
 	Platform     *Platform         `json:"platform,omitempty"`
 }
 
+// AnnotationReferenceType is the descriptor annotation BuildKit puts on
+// an index child that is an attestation manifest; AttestationManifest is
+// its value.
+const (
+	AnnotationReferenceType = "vnd.docker.reference.type"
+	AttestationManifest     = "attestation-manifest"
+)
+
+// IsAttestation reports whether d references a BuildKit attestation
+// manifest, by the annotation on d itself.
+func (d Descriptor) IsAttestation() bool {
+	return d.Annotations[AnnotationReferenceType] == AttestationManifest
+}
+
 // Platform is the platform of an index child: the fields the rootfs API
 // selects a child manifest by.
 type Platform struct {

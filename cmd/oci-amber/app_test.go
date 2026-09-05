@@ -35,12 +35,11 @@ func runApp(t *testing.T, args ...string) (config, error) {
 	t.Helper()
 	var got config
 	called := false
-	app := newApp(func(_ context.Context, cfg config) error {
+	app := newApp(commands{Serve: func(_ context.Context, cfg config) error {
 		called = true
 		got = cfg
 		return nil
-	}, func(context.Context, importConfig) error { return nil },
-		func(context.Context, browseConfig) error { return nil })
+	}})
 	app.Writer = io.Discard
 	app.ErrWriter = io.Discard
 	err := app.RunContext(context.Background(), append([]string{"oci-amber", "serve"}, args...))

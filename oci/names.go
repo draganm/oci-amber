@@ -1,6 +1,9 @@
 package oci
 
-import "regexp"
+import (
+	"regexp"
+	"strings"
+)
 
 // MaxRepositoryLength is the maximum length in bytes of a repository name.
 const MaxRepositoryLength = 255
@@ -42,4 +45,19 @@ func ValidateTag(tag string) error {
 		return NewError(CodeManifestInvalid, "invalid tag %q", tag)
 	}
 	return nil
+}
+
+// SplitReference splits "repo", "repo:tag" or "repo@digest" into the
+// repository and the reference: '@' starts a digest, a ':' after the last
+// '/' starts a tag. reference is "" for a bare repository. Neither part is
+// validated.
+func SplitReference(s string) (repo, reference string) {
+	if i := strings.IndexByte(s, '@'); i >= 0 {
+		return s[:i], s[i+1:]
+	}
+	slash := strings.LastIndexByte(s, '/')
+	if i := strings.IndexByte(s[slash+1:], ':'); i >= 0 {
+		return s[:slash+1+i], s[slash+1+i+1:]
+	}
+	return s, ""
 }

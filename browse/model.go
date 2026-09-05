@@ -8,6 +8,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/jobs-build/amber-store-core/key"
 
+	"github.com/draganm/oci-amber/oci"
 	"github.com/draganm/oci-amber/tui"
 )
 
@@ -163,7 +164,7 @@ func newModel(b *Browser, start string) (*model, error) {
 	if start == "" {
 		return m, nil
 	}
-	repo, reference := splitReference(start)
+	repo, reference := oci.SplitReference(start)
 	rn, err := b.repoNode(repo)
 	if err != nil {
 		return nil, fmt.Errorf("browse: repository %s: %w", repo, err)
@@ -178,19 +179,6 @@ func newModel(b *Browser, start string) (*model, error) {
 	}
 	m.img = &imageGroup{crumb: in.crumb, storage: []*frame{m.newFrame(in)}}
 	return m, nil
-}
-
-// splitReference splits "repo", "repo:tag" or "repo@digest": '@' starts a
-// digest, a ':' after the last '/' starts a tag.
-func splitReference(s string) (repo, reference string) {
-	if i := strings.IndexByte(s, '@'); i >= 0 {
-		return s[:i], s[i+1:]
-	}
-	slash := strings.LastIndexByte(s, '/')
-	if i := strings.IndexByte(s[slash+1:], ':'); i >= 0 {
-		return s[:slash+1+i], s[slash+1+i+1:]
-	}
-	return s, ""
 }
 
 func (m *model) newFrame(n Node) *frame {

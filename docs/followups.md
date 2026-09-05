@@ -172,3 +172,28 @@ Deferred from `docs/superpowers/specs/2026-09-05-browse-command-design.md`:
   listing would bound it.
 - Syntax highlighting and content sniffing beyond text/JSON/binary were
   ruled out of the first version.
+
+### ls and save (2026-09-05)
+
+- `save --platform` that prunes an index to one platform the way
+  `docker save --platform` does; today the whole index is saved and the
+  platform only picks the `manifest.json` entry (the host's, with no flag
+  to override it).
+- A progress line on stderr while a large prism is recomposed; `save` is
+  silent until it is done, like docker.
+- docker's containerd store also writes a
+  `containerd.io/distribution.source.<registry>` annotation on the
+  `index.json` entry; `save` does not, and nothing reads it on load.
+- `ls` opens every tag's meta.json and, for an index, its manifest; a
+  store with thousands of tags will feel it, as `browse` does.
+- Machine-readable `ls` output (`--json`) and columns for the accounting
+  numbers in meta.json (bytes added to the CAS, dedup ratio).
+- `ls` and `save` against a running `serve` over HTTP, as noted for
+  `browse`.
+- Two indexes that share a platform child (say `multi:v1` and `multi:v2`
+  after a platform was added) save as docker would, one `manifest.json`
+  entry carrying both RepoTags, but `import` rejects that shape as
+  ambiguous (`dockerarchive.assignNames`); the import follow-up above,
+  naming from the `index.json` annotations `save` writes, would fix the
+  round trip.
+

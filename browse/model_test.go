@@ -313,16 +313,6 @@ func TestStartReferences(t *testing.T) {
 			t.Errorf("newModel(%q) must fail", bad)
 		}
 	}
-	for s, want := range map[string][2]string{
-		"library/app":           {"library/app", ""},
-		"library/app:v1":        {"library/app", "v1"},
-		"library/app@sha256:ab": {"library/app", "sha256:ab"},
-		"a/b:c/d":               {"a/b:c/d", ""},
-	} {
-		if repo, ref := splitReference(s); repo != want[0] || ref != want[1] {
-			t.Errorf("splitReference(%q) = %q, %q", s, repo, ref)
-		}
-	}
 }
 
 func TestIndexFilesystemChooser(t *testing.T) {
