@@ -137,3 +137,27 @@ func (s *Store) Repositories() ([]string, error) {
 	slices.Sort(repos)
 	return repos, nil
 }
+
+// Manifests returns the digest of every manifest or index pushed to repo,
+// tagged or not, sorted bytewise. The prefix "oci/manifest/<repo>/" is
+// also a prefix of every nested repository's manifest refs, so each name
+// is parsed and its repository compared exactly, as repoHasManifests
+// does. A repository with no manifest refs yields ErrNotFound.
+func (s *Store) Manifests(repo string) ([]oci.Digest, error) {
+	refs, err := s.st.ListRefs(ManifestRef(repo, ""))
+	if err != nil {
+		return nil, fmt.Errorf("image: listing manifests of %s: %w", repo, err)
+	}
+	digests := make([]oci.Digest, 0, len(refs))
+	for _, r := range refs {
+		refRepo, d, ok := ParseManifestRef(r.Name)
+		if ok && refRepo == repo {
+			digests = append(digests, d)
+		}
+	}
+	if len(digests) == 0 {
+		return nil, ErrNotFound
+	}
+	slices.Sort(digests)
+	return digests, nil
+}

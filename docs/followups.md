@@ -151,3 +151,24 @@ Measured on an M4 Pro with real Docker Hub layers. For a 61 MiB go-flate layer (
 - Pass two overhead: a CPU profile of `ingestPrism` alone shows 1.9 s of wall time for under 0.5 s of hashing, chunking and zstd; the rest is one `WriteAt` syscall per object in amber-store-core's `appendLocked` and goroutine wakeups on the object channels and the append mutex among the GOMAXPROCS/2 writers. Batching appends belongs in amber-store-core; in this repo `emitBuffer` (8 objects, about 80 KiB with 10 KiB chunks) and `writers()` are worth tuning, and fewer writers may well be faster.
 - Search parallelism buys little: with 838 gzip candidates a non-reproducible 228 MiB layer costs 2.6 s at `--analyze-parallelism 1` and 1.35 s at 8, because the comparison aborts at the first divergent byte. Leave the default at 2.
 - Rootfs build: 1.2 s for 17.6k entries (0.4 s for 7.4k), mostly one `LookupKey` per regular file in `parseLayer`. Walking the prism's `blobs/` directory once in order, or parsing layers concurrently before applying them in order, would cut it.
+
+### browse (2026-09-05)
+
+Deferred from `docs/superpowers/specs/2026-09-05-browse-command-design.md`:
+
+- An HTTP-backed browser (`browse --url`) that works against a running
+  `serve`; needs read endpoints for the storage tree, since `/fs/` covers
+  only the rootfs. The `browse` node interface is the seam to plug it into.
+- A raw references view (every `oci/tag/`, `oci/manifest/`,
+  `oci/referrer/`, `oci/blob/` ref by namespace) for objects no image
+  reaches.
+- Exporting a file or a directory (as a tar) out of the viewer.
+- The viewer's status line is cut at the terminal width; at 100 columns
+  the key hints after the file's labels are hidden. Dropping the `image`
+  label (the breadcrumb already names the image) or wrapping the status
+  onto two lines would fix it.
+- Repository listings open every tag's meta.json; a store with thousands
+  of tags in one repository will feel it. A paged or lazily annotated
+  listing would bound it.
+- Syntax highlighting and content sniffing beyond text/JSON/binary were
+  ruled out of the first version.

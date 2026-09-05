@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/jobs-build/amber-store-core/chunkers"
@@ -39,6 +40,11 @@ const (
 
 // ErrNotFound reports an absent object, directory entry or reference.
 var ErrNotFound = errors.New("store: not found")
+
+// ErrInUse reports a store directory that another process has open. The
+// packstore takes an exclusive flock on its directory, so a second Open
+// (say `oci-amber browse` while `serve` runs) fails with EWOULDBLOCK.
+var ErrInUse = errors.New("store: in use by another process")
 
 // refStripes is the number of mutexes reference names are hashed onto.
 // Publication is serialized per name because refstore.Put is an
@@ -121,6 +127,9 @@ func Open(dir string, opts Options) (*Store, error) {
 	objects, err := packstore.Open(filepath.Join(dir, "packstore"),
 		packstore.WithSync(true), packstore.WithSegmentSize(cfg.SegmentSize))
 	if err != nil {
+		if errors.Is(err, syscall.EWOULDBLOCK) || errors.Is(err, syscall.EAGAIN) {
+			return nil, fmt.Errorf("%w: %s", ErrInUse, dir)
+		}
 		return nil, fmt.Errorf("store: %w", err)
 	}
 	refs, err := refstore.Open(filepath.Join(dir, "refs"), true)

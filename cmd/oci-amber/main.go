@@ -1,6 +1,7 @@
 // Command oci-amber runs an OCI distribution registry whose storage is an
-// embedded amber store. The `serve` subcommand runs the registry; `import`
-// stores a `docker image save` archive without running it.
+// embedded amber store. The `serve` subcommand runs the registry, `import`
+// stores a `docker image save` archive without running it, and `browse`
+// walks a store in the terminal.
 package main
 
 import (
@@ -84,7 +85,7 @@ func main() {
 		cfg.Stop = stop
 		return run(ctx, cfg)
 	}
-	if err := newApp(serve, runImport).RunContext(ctx, os.Args); err != nil {
+	if err := newApp(serve, runImport, runBrowse).RunContext(ctx, os.Args); err != nil {
 		fmt.Fprintln(os.Stderr, "oci-amber:", err)
 		os.Exit(1)
 	}
@@ -100,11 +101,11 @@ func envVar(flag string) []string {
 	return []string{envPrefix + strings.ToUpper(strings.ReplaceAll(flag, "-", "_"))}
 }
 
-// newApp builds the command line application. serve and imp are what the
-// `serve` and `import` subcommands run once their flags have been
-// validated; main passes run and runImport, tests pass functions that
-// capture the config.
-func newApp(serve func(ctx context.Context, cfg config) error, imp func(ctx context.Context, cfg importConfig) error) *cli.App {
+// newApp builds the command line application. serve, imp and brw are what
+// the `serve`, `import` and `browse` subcommands run once their flags have
+// been validated; main passes run, runImport and runBrowse, tests pass
+// functions that capture the config.
+func newApp(serve func(ctx context.Context, cfg config) error, imp func(ctx context.Context, cfg importConfig) error, brw func(ctx context.Context, cfg browseConfig) error) *cli.App {
 	return &cli.App{
 		Name:            "oci-amber",
 		Usage:           "OCI distribution registry backed by an embedded amber store",
@@ -131,6 +132,18 @@ func newApp(serve func(ctx context.Context, cfg config) error, imp func(ctx cont
 					return err
 				}
 				return imp(c.Context, cfg)
+			},
+		}, {
+			Name:      "browse",
+			Usage:     "browse a store in the terminal: images, how they are stored, their root filesystems",
+			ArgsUsage: "[repo[:tag|@digest]]",
+			Flags:     browseFlags(),
+			Action: func(c *cli.Context) error {
+				cfg, err := browseConfigFromCLI(c)
+				if err != nil {
+					return err
+				}
+				return brw(c.Context, cfg)
 			},
 		}},
 	}

@@ -258,3 +258,19 @@ func TestCloseIsIdempotent(t *testing.T) {
 		t.Fatalf("second Close: %v", err)
 	}
 }
+
+func TestOpenWhileOpenReportsInUse(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "store")
+	st, err := store.Open(dir, store.Options{})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer st.Close()
+	_, err = store.Open(dir, store.Options{})
+	if !errors.Is(err, store.ErrInUse) {
+		t.Fatalf("second Open returned %v, want ErrInUse", err)
+	}
+	if !strings.Contains(err.Error(), dir) {
+		t.Fatalf("error %q does not name the directory", err)
+	}
+}

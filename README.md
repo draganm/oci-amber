@@ -4,8 +4,8 @@ oci-amber is an OCI distribution registry whose storage is an embedded
 [amber-store-core](https://github.com/jobs-build/amber-store-core) store. It
 speaks the standard `/v2/` API, so docker, containerd/nerdctl, podman/skopeo,
 crane, oras and buildkit push and pull against it without any client-side
-configuration beyond the registry URL, and imports `docker image save`
-archives directly.
+configuration beyond the registry URL, imports `docker image save`
+archives directly, and has a terminal browser over the store.
 
 Instead of keeping each layer as an opaque compressed blob, oci-amber takes
 layers apart on push: [zrecipe](https://github.com/draganm/zrecipe)
@@ -110,6 +110,74 @@ Added to CAS    1.1 MiB     1,153,024 bytes   appended to pack segments, manifes
 Dedup ratio     1.65x       compressed bytes ÷ bytes added to CAS   (39.3% not written)
 Chunks reused   38.2%       of offered bytes were already in the store
 ```
+
+## Browsing a store
+
+`oci-amber browse` opens a store in a terminal browser: the repositories
+and their tags, how every image is stored, the root filesystem its layers
+produce, and the content of any file it reaches.
+
+```sh
+./oci-amber browse --store /var/lib/oci-amber
+./oci-amber browse --store /var/lib/oci-amber library/app:v1
+```
+
+It opens the store directly, so it cannot run while `serve` has it open
+(`store … is in use by another process`), and it never writes: the work
+directory is not touched and a missing store is an error, not created.
+Stdout must be a terminal. `--log-file path` keeps the log; without it,
+warnings are printed to stderr after the screen closes. The optional
+argument starts inside a repository (`repo`) or an image (`repo:tag`,
+`repo@sha256:…`).
+
+The screen is one listing at a time under a breadcrumb. The repositories
+come first; a repository lists its tags (kind, short digest, size, rootfs
+status when not `ok`) and then the manifests no tag points at. An image
+opens in the **storage** view: the amber tree under its root, annotated
+with what oci-amber knows about it.
+
+```
+library/app › :v1 › storage
+  blobs/          3 blobs
+  manifest        application/vnd.oci.image.manifest.v1+json    1.2 KiB
+  meta.json       kind, digest, stats and rootfs status          812 B
+  rootfs/         ok · 1,204 entries
+```
+
+`blobs/` lists the config and layers in manifest order with how each is
+stored (`layer 1/2 · prism gzip go-flate · 1,834 files · 402.1 MiB
+uncompressed`, `config · raw not-tar`); a blob opens its root
+(`meta.json`, `comp.json`, `recipe.json`, `recipe.bin`, `blobs/`, or
+`meta.json` and `raw`), and a prism's `blobs/` shows every numbered file
+next to the tar entry it holds. An index's `manifests/` lists its
+children by platform. `rootfs/` is the stored tree as it is, in `ls -l`
+columns, symlinks shown but not followed.
+
+`f` switches to the **filesystem** view of the image the breadcrumb is
+under: the same tree through the resolver the `/fs/` API uses, so
+symlinks are followed (Enter on a symlink to a directory descends under
+the link's own name). An index offers its platforms first; an image
+without a view says why. `f` again returns to the storage view where it
+was; both views keep their position.
+
+Enter on a file opens the viewer. Text (valid UTF-8 without NUL bytes) is
+shown with line numbers; JSON is pretty-printed and `p` shows the stored
+bytes; anything else is a hex dump that reads only the window on screen,
+so a 2 GiB blob opens at once, and `:` jumps to an offset. `h` switches
+between text and hex; files over 8 MiB are hex only.
+
+| Key | Action |
+|---|---|
+| `↑` `↓` `pgup` `pgdn` `g` `G` | move |
+| `enter` `→` | open the row |
+| `backspace` `←` `esc` | back |
+| `f` | storage ↔ filesystem |
+| `/` | filter the listing; in the viewer, search (`n`/`N` between hits) |
+| `i` | full digest, key, mode, owner, mtime and more for the row |
+| `h` | text ↔ hex in the viewer; back in a listing |
+| `p` | JSON pretty ↔ stored bytes |
+| `:` | go to an offset in hex |
+| `q` `ctrl-c` | quit |
 
 ## Configuration
 
