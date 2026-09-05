@@ -146,7 +146,7 @@ node can be listed again after an error.
 
 | Node | Crumb | Rows |
 |---|---|---|
-| `repos` | `oci-amber` | one per repository, from one scan of `oci/tag/` and `oci/manifest/` refs grouped with `image.ParseTagRef` and `image.ParseManifestRef`; detail `N tags` (and `M untagged` when there are any) |
+| `repos` | `oci-amber` | one per repository, from one scan of `oci/tag/` and `oci/manifest/` refs grouped with `image.ParseTagRef` and `image.ParseManifestRef`; detail `N tags · M manifests` |
 | `repo` | repository name | tags in bytewise order, then untagged manifest digests marked `(untagged)`; each row opens the image with `image.Store.Open`; detail `manifest`/`index`, short digest, rootfs status when not `ok`; size is `Meta.Stats.TotalBytes` |
 | `imageRoot` | `:tag` or `@sha256:4f7c…` (the short digest), then a `storage` segment | the image root: `manifest`, `meta.json`, `blobs/`, `manifests/` (index only), `rootfs/` (when Meta.Rootfs says a tree exists); a child root reached through `manifests/` has the crumb `@sha256:…` without a `storage` segment |
 | `imageBlobs` | `blobs` | the manifest's config then its layers in manifest order (an entry of the amber dir the manifest does not name is appended), each opening the blob root; detail: role (`config`, `layer 3/7`), then from the blob's meta.json `prism gzip go-flate` / `prism none` / `raw not-tar`, entry count, uncompressed size; size is the compressed size |
@@ -182,9 +182,11 @@ image  {ctx, active, storage []frame, fs []frame}   nil outside an image
 - Enter on a row with a `Child` pushes a frame for it onto the active
   stack (or onto `base` when there is no image yet; opening an image row
   creates the image group with `storage = [imageRoot]`).
-- Backspace pops the active stack; popping its last frame drops the image
-  group and returns to the repository listing. Popping `repo` returns to
-  `repos`; Backspace on `repos` does nothing.
+- Backspace pops the active stack. Popping the last frame of the fs stack
+  returns to the storage stack where it was; popping the last frame of
+  the storage stack drops the image group and returns to the repository
+  listing. Popping `repo` returns to `repos`; Backspace on `repos` does
+  nothing.
 - `f` switches the active stack. From storage, the target is the
   filesystem of the innermost `imageRoot` frame on the storage stack: an
   `fsDir` root when that image has a tree, an `fsChooser` for an index,
@@ -216,7 +218,7 @@ in the status line, pops the frame and leaves the cursor where it was.
 | `pgup` `pgdn` | list, viewer | move one page |
 | `g` `G` | list, viewer | first and last row |
 | `enter` `→` `l` | list | open the row's `Child` or file |
-| `backspace` `←` `h` `esc` | list | back one frame (`h` is hex/text in the viewer, see below) |
+| `backspace` `←` `h` `esc` | list | back one frame (`esc` first clears an active filter); in the viewer `h` is hex/text and `←`/`→` scroll, so back is `backspace` or `esc` |
 | `f` | list, viewer | switch storage ↔ filesystem |
 | `/` | list | filter: a text input in the status line; rows whose name or detail contain the text case-insensitively stay; `enter` keeps the filter and returns to the list, `esc` clears it |
 | `i` | list | info popup for the row under the cursor; any key closes it |
@@ -352,5 +354,6 @@ string` are pure functions.
   that the filter hides rows and resets the cursor, and that the viewer
   opens in the right mode and switches with `h` and `p`.
 - **Command.** `cmd/oci-amber` tests for flag parsing and the startup
-  rules: missing store, store in use (open it twice), stdout not a
-  terminal, an unknown starting reference.
+  rules: missing store (and that none is created), stdout not a
+  terminal. The in-use mapping is covered by `store.ErrInUse`'s test; an
+  unknown starting reference by `newModel`'s test.
