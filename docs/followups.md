@@ -136,6 +136,12 @@ Deferred from `docs/superpowers/specs/2026-09-04-rootfs-view-design.md`:
 - The merge tree and each layer's parsed entry list live in memory under the repository lock, proportional to the merged entry count; a hard cap (`unavailable: too many entries`) would bound a crafted push cheaply.
 - Rootfs API: a listing without `n` materialises the whole directory (tens of MB for a 200k-entry directory); a server-side page cap with `Link` continuation would bound it. A dangling symlink answers `PATH_UNKNOWN` without naming its target; the parent listing carries it, but the message could too.
 
+### import
+
+- derive names from index.json's io.containerd.image.name /
+  org.opencontainers.image.ref.name annotations, RepoTags as fallback; this
+  also names archives saved by image ID from the containerd store.
+
 ### ingestion performance (2026-09-04)
 
 Measured on an M4 Pro with real Docker Hub layers. For a 61 MiB go-flate layer (228 MiB of tar, 15k entries) the 11.2 s blob finalization was: pass one (stdlib inflate, spool, hashes) 0.8 s; search 3.6 s, all of it the one go-flate recompression that matches; pass two (klauspost inflate, hashes, chunking, store writes) 1.7 s; round-trip check 5.0 s, of which compose 1.5 s and recompress 3.5 s. Done since: the round-trip's compose and recompress overlap through a queued pipe (`blob/pipe.go`, 5.1 s to 3.8 s), and zrecipe's pigz engine compresses blocks on parallel workers (a pigz-compressed 28 MiB debian layer recompressed at 15 MB/s before). Deferred:

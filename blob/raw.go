@@ -26,7 +26,7 @@ func (b *Store) ingestRaw(ctx context.Context, w *store.Writer, sp *upload.Spool
 	if c, ok := r.(io.Closer); ok {
 		defer c.Close()
 	}
-	k, err := w.PutStream(r)
+	k, err := w.PutStream(b.observeReader(sp.Digest(), r))
 	if err != nil {
 		return key.Key{}, fmt.Errorf("blob: storing raw bytes: %w", err)
 	}
