@@ -88,6 +88,7 @@ func main() {
 		},
 		Import: runImport,
 		Browse: runBrowse,
+		Ls:     runLs,
 	}
 	if err := newApp(cmds).RunContext(ctx, os.Args); err != nil {
 		fmt.Fprintln(os.Stderr, "oci-amber:", err)
@@ -112,6 +113,7 @@ type commands struct {
 	Serve  func(ctx context.Context, cfg config) error
 	Import func(ctx context.Context, cfg importConfig) error
 	Browse func(ctx context.Context, cfg browseConfig) error
+	Ls     func(ctx context.Context, cfg lsConfig) error
 }
 
 // newApp builds the command line application over cmds.
@@ -125,6 +127,10 @@ func newApp(cmds commands) *cli.App {
 	}
 	if brw == nil {
 		brw = func(context.Context, browseConfig) error { return nil }
+	}
+	ls := cmds.Ls
+	if ls == nil {
+		ls = func(context.Context, lsConfig) error { return nil }
 	}
 	return &cli.App{
 		Name:            "oci-amber",
@@ -164,6 +170,18 @@ func newApp(cmds commands) *cli.App {
 					return err
 				}
 				return brw(c.Context, cfg)
+			},
+		}, {
+			Name:      "ls",
+			Usage:     "list the images in a store",
+			ArgsUsage: "[repo]",
+			Flags:     lsFlags(),
+			Action: func(c *cli.Context) error {
+				cfg, err := lsConfigFromCLI(c)
+				if err != nil {
+					return err
+				}
+				return ls(c.Context, cfg)
 			},
 		}},
 	}
