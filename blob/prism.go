@@ -352,7 +352,7 @@ func classifyDecomposeError(ctx context.Context, err error) error {
 // upload must fail. Objects written before a failure are left to GC.
 func (b *Store) finalizePrism(ctx context.Context, sp *upload.Spool, params *zrecipe.Params, d oci.Digest) (prismResult, store.Stats, error) {
 	w := b.st.NewWriter(ctx)
-	b.observeStage(d, StageDecompose)
+	b.observeStage(d, StageCommit)
 	res, err := b.ingestPrism(ctx, w, sp, params)
 	if err != nil {
 		w.Abort()

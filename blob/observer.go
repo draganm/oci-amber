@@ -8,16 +8,17 @@ import (
 )
 
 // Stage is one phase of a blob's finalization, in the order Put runs them.
-// Analyze always comes first; a prism continues with decompose and, when
-// VerifyRoundTrip is set, verify; a raw decision or a downgrade ends with
-// raw.
+// Analyze always comes first and, for a tar candidate, covers the
+// speculative decompose that stages the layer's parts while the engine
+// search runs; a prism continues with commit and, when VerifyRoundTrip is
+// set, verify; a raw decision or a downgrade ends with raw.
 type Stage string
 
 const (
-	StageAnalyze   Stage = "analyze"   // zrecipe pass one and the engine search
-	StageDecompose Stage = "decompose" // pass two: decompress and take the tar apart
-	StageVerify    Stage = "verify"    // round-trip check
-	StageRaw       Stage = "raw"       // storing the bytes verbatim
+	StageAnalyze Stage = "analyze" // zrecipe pass one, the engine search and the staging
+	StageCommit  Stage = "commit"  // inserting the staged pack into the store
+	StageVerify  Stage = "verify"  // round-trip check
+	StageRaw     Stage = "raw"     // storing the bytes verbatim
 )
 
 // Observer receives finalization progress from Put. BlobStage says d
@@ -25,13 +26,21 @@ const (
 // compressed size, have been handled in the current stage. n never
 // decreases within a stage. In analyze it is the spool's sequential read
 // position, which reaches the size when pass one is done and then holds
-// while the engine search reads through ReadAt; in decompose it is the
-// pass-two read position; in verify the bytes recompressed so far; in raw
+// while the engine search reads through ReadAt; in commit it is the staged
+// pack's bytes read so far, scaled to the size; in verify the bytes recompressed so far; in raw
 // the bytes stored so far. A dedup hit reports nothing. Methods are called
 // from the goroutines running Put, concurrently for different digests.
 type Observer interface {
 	BlobStage(d oci.Digest, s Stage)
 	BlobProgress(d oci.Digest, n int64)
+}
+
+// observeProgress reports n bytes of d handled in the current stage when
+// an observer is configured.
+func (b *Store) observeProgress(d oci.Digest, n int64) {
+	if b.opts.Observer != nil {
+		b.opts.Observer.BlobProgress(d, n)
+	}
 }
 
 // observeStage reports a stage transition when an observer is configured.
