@@ -70,6 +70,30 @@ func TestImportFlagsExplicit(t *testing.T) {
 	}
 }
 
+func TestImportFlagsFromEnv(t *testing.T) {
+	clearEnv(t)
+	t.Setenv("OCI_AMBER_STORE", "/srv/env-store")
+	t.Setenv("OCI_AMBER_PROGRESS", "plain")
+	t.Setenv("OCI_AMBER_LOG_FILE", "/tmp/env.log")
+
+	cfg, err := runImportApp(t, "image.tar")
+	if err != nil {
+		t.Fatalf("import from env: %v", err)
+	}
+	if cfg.Store != "/srv/env-store" || cfg.Progress != "plain" || cfg.LogFile != "/tmp/env.log" {
+		t.Fatalf("env flags: got %+v", cfg)
+	}
+
+	// A command-line flag wins over the environment.
+	cfg, err = runImportApp(t, "--progress", "tui", "image.tar")
+	if err != nil {
+		t.Fatalf("import with override: %v", err)
+	}
+	if cfg.Progress != "tui" {
+		t.Fatalf("progress = %q, want %q (flag must override env)", cfg.Progress, "tui")
+	}
+}
+
 func TestImportRejectsBadValues(t *testing.T) {
 	clearEnv(t)
 	for _, args := range [][]string{

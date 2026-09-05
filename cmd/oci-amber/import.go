@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/charmbracelet/x/term"
 	"github.com/urfave/cli/v2"
 
 	"github.com/draganm/oci-amber/blob"
@@ -130,10 +131,8 @@ func runImport(ctx context.Context, cfg importConfig) error {
 	mode := cfg.Progress
 	if mode == "auto" {
 		mode = "plain"
-		if f, ok := stdout.(*os.File); ok {
-			if fi, err := f.Stat(); err == nil && fi.Mode()&os.ModeCharDevice != 0 {
-				mode = "tui"
-			}
+		if f, ok := stdout.(*os.File); ok && term.IsTerminal(f.Fd()) {
+			mode = "tui"
 		}
 	}
 	workDir := cfg.WorkDir
@@ -207,16 +206,23 @@ func runImport(ctx context.Context, cfg importConfig) error {
 
 	plan, err := arch.Plan(dockerarchive.PlanOptions{Names: cfg.Names, Present: blobs.Exists})
 	if err != nil {
-		return err
+		return fmt.Errorf("planning import: %w", err)
 	}
 	im := importer.New(blobs, images, arch, plan, tr, importer.Options{Workers: cfg.MaxConcurrentFinalize})
+
+	label := cfg.Archive
+	if label == "-" {
+		label = "stdin"
+	} else {
+		label = filepath.Base(label)
+	}
 
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	run := func() (*importer.Report, error) { return im.Run(ctx) }
 	var rep *importer.Report
 	if mode == "tui" {
-		rep, err = tui.Run(tr, importTitle(cfg.Archive, plan), cancel, run)
+		rep, err = tui.Run(tr, importTitle(label, plan), cancel, run)
 	} else {
 		rep, err = tui.RunPlain(stderr, tr, plainStatusInterval, run)
 	}
@@ -226,23 +232,25 @@ func runImport(ctx context.Context, cfg importConfig) error {
 		}
 		return err
 	}
-	fmt.Fprint(stdout, tui.RenderReport(rep, filepath.Base(cfg.Archive)))
+	// Close the store explicitly and check the error before reporting
+	// success: Close is a real flush (GC, refs, objects) that can fail, and
+	// a failed flush must not be masked by a success report. The deferred
+	// st.Close() above is an idempotent backstop (store.Close uses
+	// sync.Once) in case a path above this point returns early.
+	if err := st.Close(); err != nil {
+		return fmt.Errorf("closing store: %w", err)
+	}
+	fmt.Fprint(stdout, tui.RenderReport(rep, label))
 	return nil
 }
 
-// importTitle is the TUI's first line: the archive and the names.
-func importTitle(archive string, plan *dockerarchive.Plan) string {
+// importTitle is the TUI's first line: the archive's label and the names.
+func importTitle(label string, plan *dockerarchive.Plan) string {
 	var names []string
 	for _, e := range plan.Entries {
 		for _, n := range e.Names {
 			names = append(names, n.String())
 		}
-	}
-	label := archive
-	if archive == "-" {
-		label = "stdin"
-	} else {
-		label = filepath.Base(archive)
 	}
 	return fmt.Sprintf("Importing %s → %s", label, strings.Join(names, ", "))
 }
