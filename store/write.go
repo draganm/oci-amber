@@ -65,49 +65,66 @@ var (
 // writers (each is at most one max-size chunk, so about 8 MiB in flight).
 const emitBuffer = 8
 
-// Writer streams CAS objects into the store through one
-// packstore.WriteParallel call and accounts for them. Objects are offered
-// with Emit (directly, or through PutStream, PutBytes and Dir) from any
-// number of goroutines; Close waits for every offered object to be durable
-// and returns the Stats. The Writer's context bounds its whole life: once
-// it is cancelled, Emit fails and Close returns the context's error.
+// item is one object queued for the backend: a built object (Data) or a
+// record staged in a pack (Record), with the payload length the
+// accounting charges for it.
+type item struct {
+	obj     packstore.Object
+	logical int64
+}
+
+// Writer builds CAS objects and hands them to a backend. The live backend
+// (NewWriter) streams them into the store through one
+// packstore.WriteParallel call and accounts for them; the pack backend
+// (NewPackWriter) encodes them into a pack file for a later AddPack.
+// Objects are offered with Emit (directly, or through PutStream, PutBytes
+// and Dir) from any number of goroutines; Close waits for every offered
+// object to be durable, or staged, and returns the Stats. The Writer's
+// context bounds its whole life: once it is cancelled, Emit fails and
+// Close returns the context's error.
 type Writer struct {
 	s      *Store
 	ctx    context.Context
 	cancel context.CancelCauseFunc
 	ic     chunkers.ItemChunker
-	ch     chan fstree.Object
-	done   chan struct{} // closed when WriteParallel has returned
+	ch     chan item
+	done   chan struct{} // closed when the backend has returned
+	pack   *Pack         // the pack backend's file; nil for the live backend
 
-	mu     sync.RWMutex // held shared by Emit for the send; exclusively to close ch
+	mu     sync.RWMutex // held shared by emit for the send; exclusively to close ch
 	closed bool
 
-	// Written only by the accounting iterator (the goroutine feeding
-	// WriteParallel) and by run; read after done is closed.
+	// Written only by the backend goroutines; read after done is closed.
 	logical int64
-	seen    map[key.Key]bool // every key offered -> Has reported it absent
+	seen    map[key.Key]bool // live backend: every key offered -> Has reported it absent
 	wstats  packstore.WriteStats
 	werr    error
 
 	once   sync.Once
 	result Stats
 	rerr   error
+	sealed bool // pack backend: Close succeeded and Pack() is valid
 }
 
-// NewWriter starts a Writer over s bound to ctx. It launches the store's
-// parallel writer immediately; the caller must end the Writer with Close
-// or Abort.
-func (s *Store) NewWriter(ctx context.Context) *Writer {
+// newWriter builds a Writer bound to ctx without starting a backend.
+func (s *Store) newWriter(ctx context.Context) *Writer {
 	ctx, cancel := context.WithCancelCause(ctx)
-	w := &Writer{
+	return &Writer{
 		s:      s,
 		ctx:    ctx,
 		cancel: cancel,
 		ic:     chunkers.NewItemChunker(ItemBits),
-		ch:     make(chan fstree.Object, emitBuffer),
+		ch:     make(chan item, emitBuffer),
 		done:   make(chan struct{}),
 		seen:   make(map[key.Key]bool),
 	}
+}
+
+// NewWriter starts a live Writer over s bound to ctx. It launches the
+// store's parallel writer immediately; the caller must end the Writer with
+// Close or Abort.
+func (s *Store) NewWriter(ctx context.Context) *Writer {
+	w := s.newWriter(ctx)
 	go w.run()
 	return w
 }
@@ -138,18 +155,18 @@ func (w *Writer) objects() iter.Seq2[packstore.Object, error] {
 			case <-w.ctx.Done():
 				yield(packstore.Object{}, context.Cause(w.ctx))
 				return
-			case o, ok := <-w.ch:
+			case it, ok := <-w.ch:
 				if !ok {
 					if err := context.Cause(w.ctx); err != nil {
 						yield(packstore.Object{}, err)
 					}
 					return
 				}
-				if err := w.account(o); err != nil {
+				if err := w.account(it); err != nil {
 					yield(packstore.Object{}, err)
 					return
 				}
-				if !yield(packstore.Object{Key: o.Key, Data: o.Bytes}, nil) {
+				if !yield(it.obj, nil) {
 					return
 				}
 			}
@@ -157,26 +174,31 @@ func (w *Writer) objects() iter.Seq2[packstore.Object, error] {
 	}
 }
 
-// account records one offered object. It runs on the iterator goroutine
+// account records one offered item. It runs on the iterator goroutine
 // only, so it needs no lock.
-func (w *Writer) account(o fstree.Object) error {
-	w.logical += int64(len(o.Bytes))
-	if _, seen := w.seen[o.Key]; seen {
+func (w *Writer) account(it item) error {
+	w.logical += it.logical
+	if _, seen := w.seen[it.obj.Key]; seen {
 		return nil
 	}
-	has, err := w.s.Objects.Has(o.Key)
+	has, err := w.s.Objects.Has(it.obj.Key)
 	if err != nil {
 		return err
 	}
-	w.seen[o.Key] = !has
+	w.seen[it.obj.Key] = !has
 	return nil
 }
 
-// Emit offers one built object to the store. It is safe for concurrent use
-// and blocks only while the pipeline is full. It fails once the Writer is
-// closed or aborted, its context is cancelled, or the store writer has
+// Emit offers one built object to the backend. It is safe for concurrent
+// use and blocks only while the pipeline is full. It fails once the Writer
+// is closed or aborted, its context is cancelled, or the backend has
 // stopped with an error.
 func (w *Writer) Emit(o fstree.Object) error {
+	return w.emit(item{obj: packstore.Object{Key: o.Key, Data: o.Bytes}, logical: int64(len(o.Bytes))})
+}
+
+// emit is Emit for a queued item.
+func (w *Writer) emit(it item) error {
 	w.mu.RLock()
 	defer w.mu.RUnlock()
 	if w.closed {
@@ -186,7 +208,7 @@ func (w *Writer) Emit(o fstree.Object) error {
 		return err
 	}
 	select {
-	case w.ch <- o:
+	case w.ch <- it:
 		return nil
 	case <-w.ctx.Done():
 		return context.Cause(w.ctx)
@@ -255,19 +277,37 @@ func (w *Writer) PutBytes(b []byte) (key.Key, error) {
 	return w.PutStream(bytes.NewReader(b))
 }
 
-// Close ends the object stream, waits for WriteParallel to make everything
-// durable and returns the accounting. It is idempotent: later calls return
-// the same result. It returns the Writer's context error when the context
-// was cancelled, errAborted after Abort, and the store's error when a write
-// failed; in those cases the objects appended so far are left for GC.
+// Close ends the object stream, waits for the backend to make everything
+// durable (or, for a pack Writer, staged) and returns the accounting. It
+// is idempotent: later calls return the same result. It returns the
+// Writer's context error when the context was cancelled, errAborted after
+// Abort, and the backend's error when a write failed; in those cases the
+// objects appended so far are left for GC, and a pack Writer's file is
+// released.
 func (w *Writer) Close() (Stats, error) {
 	w.closeStream()
 	<-w.done
+	w.settle()
+	return w.result, w.rerr
+}
+
+// settle computes the result once the backend has returned: the Stats or
+// the error and, for the pack backend, whether the pack survives (a
+// failed run releases its file). It runs once; Close and Abort both call
+// it, so Close after Abort reports errAborted and an Abort after a
+// successful Close leaves the pack alone.
+func (w *Writer) settle() {
 	w.once.Do(func() {
 		w.result, w.rerr = w.finish()
 		w.cancel(errWriterClosed)
+		if w.pack != nil {
+			if w.rerr != nil {
+				w.pack.f.Close()
+			} else {
+				w.sealed = true
+			}
+		}
 	})
-	return w.result, w.rerr
 }
 
 // closeStream marks the Writer closed and closes the object channel once.
@@ -281,7 +321,8 @@ func (w *Writer) closeStream() {
 	close(w.ch)
 }
 
-// finish computes the Stats after WriteParallel has returned.
+// finish computes the Stats after the backend has returned: the logical
+// bytes alone for a pack, the full accounting for the live backend.
 func (w *Writer) finish() (Stats, error) {
 	err := w.werr
 	if err == nil {
@@ -289,6 +330,9 @@ func (w *Writer) finish() (Stats, error) {
 	}
 	if err != nil {
 		return Stats{}, err
+	}
+	if w.pack != nil {
+		return Stats{LogicalBytes: w.logical}, nil
 	}
 	st := Stats{
 		LogicalBytes:    w.logical,
@@ -312,14 +356,15 @@ func (w *Writer) finish() (Stats, error) {
 	return st, nil
 }
 
-// Abort stops the Writer: in-flight and later Emit calls fail, WriteParallel
+// Abort stops the Writer: in-flight and later Emit calls fail, the backend
 // is stopped, and Close reports errAborted. Objects already appended stay
-// in the store as unreachable garbage. Safe to call more than once and
-// after Close.
+// in the store as unreachable garbage; a pack Writer's file is released.
+// Safe to call more than once and after Close.
 func (w *Writer) Abort() {
 	w.cancel(errAborted)
 	w.closeStream()
 	<-w.done
+	w.settle()
 }
 
 // XattrInlineMax is the largest canonical encoding of an extended-attribute

@@ -47,8 +47,8 @@ served blob is byte-identical to what was pushed.
 | `github.com/jobs-build/amber-store-core` | packstore, refstore, fstree builders/readers, chunkers, gc |
 | `github.com/draganm/zrecipe` | `Analyze`, `Recompress`, `Params` |
 | `github.com/draganm/tar-prism` | `DecomposeTo`, `ComposeFrom`, `Index`, `Entry` (new sink/source API, see below) |
-| `github.com/klauspost/compress` | second-pass gzip and zstd decompression |
-| `lukechampine.com/blake3` | verifying the second pass against zrecipe's recorded digest |
+| `github.com/klauspost/compress` | the bounded compressed tar-header probe |
+| `lukechampine.com/blake3` | hashing the staged stream against zrecipe's recorded digest |
 | `github.com/urfave/cli/v2` | the `oci-amber` command line |
 | `log/slog` | logging |
 
@@ -67,7 +67,7 @@ Top-level packages, no `internal/`:
 cmd/oci-amber/   the binary: `oci-amber serve`
 oci/             OCI grammar and wire types: digests, names, tags, media types, error envelope
 store/           the amber embedding: open/close, streaming put, streaming read, refs
-blob/            one OCI blob in amber: push (analyze, decompose, ingest) and pull (compose, recompress)
+blob/            one OCI blob in amber: push (analyze with speculative decompose, commit) and pull (compose, recompress)
 image/           manifests and indexes: validation, image roots, tag/digest/referrer refs, catalog
 upload/          upload sessions: memory buffer that spills to the work directory
 registry/        net/http handlers and router
@@ -275,48 +275,42 @@ the upload proceeds and step 2 catches it.
 3. **Finalize slot.** Acquire one of `--max-concurrent-finalize` slots
    (default `max(1, NumCPU/2)`). This bounds engine-search CPU and spool
    memory.
-4. **Pass one: analyze.** `zrecipe.Analyze(ctx, spool, &Options{TempDir:
-   <work-dir>/oci-amber/spool, MaxInMemory: --max-in-memory, Parallelism:
-   --analyze-parallelism (default 2)})` under a child context with
-   `--analyze-timeout` (default 15 min). No `Uncompressed` sink is attached.
+4. **Pass one: analyze and stage.** After the pre-checks (the zstd window
+   bound, the compressed tar-header probe, and the uncompressed
+   tar-header probe for streams `Detect` reports as `none`; each decides
+   raw `not-tar` or `unsupported` without staging anything),
+   `zrecipe.Analyze(ctx, spool, &Options{TempDir: <work-dir>/oci-amber/spool,
+   MaxInMemory: --max-in-memory, Parallelism: --analyze-parallelism
+   (default 2), Uncompressed: pipe})` runs under a child context with
+   `--analyze-timeout` (default 15 min). The pipe carries the decompressed
+   stream to a goroutine that hashes it (BLAKE3, sha256, length) and runs
+   `tarprism.DecomposeTo` with the amber sink over a pack-backed
+   `store.Writer`: the recipe, the index and every file content are built
+   exactly as for the store and encoded as records into an unlinked temp
+   pack under `<work-dir>/oci-amber/spool`. The stager always reads the
+   pipe to its end, so it never blocks or fails `Analyze`. See
+   `2026-09-05-speculative-decompose-design.md`.
 5. **Classify.**
-   - Before step 4 runs: a gzip or zstd stream (`Detect`) whose first 512
-     decompressed bytes are not a tar header with a valid checksum is raw
-     with reason `not-tar`; the engine search and pass two are skipped
-     entirely. The probe is a bounded klauspost read of one block, nothing
-     is spooled, and a probe that cannot read the stream decides nothing
-     (Analyze runs and classifies it).
-   - `Params.Format` gzip or zstd with an engine: prism candidate.
-   - `Params.Format == none`: prism candidate only if the first 512 bytes are
-     a tar header with a valid checksum; otherwise raw with reason `not-tar`.
+   - `Params.Format` gzip, zstd or none with staging succeeded: prism
+     candidate. The staged stream's BLAKE3 and length must equal
+     `Params.Uncompressed`.
+   - `Params` found but tar-prism rejected the stream, or the digests
+     differ: raw with reason `decompose-failed` (error-level log). A pack
+     write failure fails the upload with `500`, as an amber write failure
+     does.
    - `ErrNotReproducible`, `ErrUnsupported`, `ErrCorrupt`: raw with the
-     matching reason. (`ErrCorrupt` cannot be an amber failure because no sink
-     is attached.)
-   - Child deadline exceeded while the request context is still live: raw with
-     reason `analyze-timeout`.
+     matching reason; the pack is dropped.
+   - Child deadline exceeded while the request context is still live: raw
+     with reason `analyze-timeout`; the pack is dropped.
    - Any other error, including the request context being cancelled: the
-     upload fails with `500`, the session is put back so the client may retry
-     the PUT, and nothing is stored.
-6. **Pass two: decompose and ingest** (prism candidates). Reopen the spool
-   from offset 0 and decompress it with klauspost gzip or zstd (plain copy for
-   `none`). Tee the decompressed stream through BLAKE3 and sha256. Feed it to
-   `tarprism.DecomposeTo(r, sink)` where `sink` is an amber sink:
-   - `Recipe()` returns a pipe whose reader side is consumed by a goroutine
-     running `store.PutStream`; `Close` waits for the goroutine and records
-     the recipe's content key.
-   - `Blob(i, entry, r)` calls `store.PutStream(io.LimitReader(r,
-     entry.Size))` and records the key under the name `%08d`. Chunker reads
-     go straight from tar-prism's buffered reader; no pipe, no goroutine.
-   - `Index(idx)` marshals the index exactly as tar-prism's `writeIndex` does
-     (indented JSON plus newline) and stores it through `PutStream`.
-
-   All objects from all builders flow through one `packstore.WriteParallel`
-   call wrapped by the accounting iterator (below). When `DecomposeTo`
-   returns, the BLAKE3 of the decompressed stream must equal
-   `Params.Uncompressed.Blake3` and its length `Params.Uncompressed.Size`;
-   the sha256 becomes `diffId`. A mismatch or a decompose error means the
-   objects written so far are abandoned to GC and the blob is stored raw
-   with reason `decompose-failed`.
+     upload fails with `500`, the session is put back so the client may
+     retry the PUT, and nothing is stored.
+6. **Commit** (prism candidates). One accounting writer inserts the pack's
+   records into the store (`AddPack`: dedup against the store and within
+   the pack, verification, the GC barrier, exactly as freshly built
+   objects get) and stores comp.json; its stats become the blob's. The
+   sha256 of the staged stream becomes `diffId`. A store failure abandons
+   the objects written so far to GC and fails the upload.
 7. **Raw path.** `store.PutStream(spool)` through the accounting iterator.
    The spool is the verbatim bytes, whatever their format.
 8. **Round-trip verification** (`--verify-roundtrip`, default on, prisms
@@ -615,7 +609,7 @@ and source; oci-amber then requires that version.
 | Situation | Outcome |
 |---|---|
 | zrecipe `ErrNotReproducible`, `ErrUnsupported`, `ErrCorrupt`, non-tar `none` or compressed non-tar (first decompressed block), zstd frame window above 128 MiB (`unsupported`), analyze deadline | stored raw, reason recorded, `201` |
-| second-pass digest mismatch, tar-prism decompose error, round-trip failure | stored raw, reason recorded, error-level log for the last two, `201`. A compressed blob that is not a tar never reaches this row: step 5 classifies it `not-tar` before the engine search, so the error level is reserved for archives that really did look decomposable |
+| staged-stream digest mismatch, tar-prism decompose error, round-trip failure | stored raw, reason recorded, error-level log for the last two, `201`. A compressed blob that is not a tar never reaches this row: step 4's pre-checks classify it `not-tar` before the engine search, so the error level is reserved for archives that really did look decomposable |
 | amber write error, I/O error on the spool, request context cancelled during finalize | `500`, session retained for retry, nothing published |
 | ref publish error | `500`, objects left for GC |
 | pull-side compose/recompress error or digest mismatch | connection aborted, error-level log |

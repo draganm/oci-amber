@@ -147,8 +147,26 @@ Deferred from `docs/superpowers/specs/2026-09-04-rootfs-view-design.md`:
 Measured on an M4 Pro with real Docker Hub layers. For a 61 MiB go-flate layer (228 MiB of tar, 15k entries) the 11.2 s blob finalization was: pass one (stdlib inflate, spool, hashes) 0.8 s; search 3.6 s, all of it the one go-flate recompression that matches; pass two (klauspost inflate, hashes, chunking, store writes) 1.7 s; round-trip check 5.0 s, of which compose 1.5 s and recompress 3.5 s. Done since: the round-trip's compose and recompress overlap through a queued pipe (`blob/pipe.go`, 5.1 s to 3.8 s), and zrecipe's pigz engine compresses blocks on parallel workers (a pigz-compressed 28 MiB debian layer recompressed at 15 MB/s before). Deferred:
 
 - Recompress once, not twice. The search already proves the params reproduce the bytes; the round-trip could compose and compare BLAKE3 and size against pass one's `params.Uncompressed`, saving the 3.5 s second recompression (31% of that layer). The zlib level-0 incident (`docs/zrecipe-zlib-level0-roundtrip.md`) was caught by the recompressing round-trip, so this changes what the check guarantees; a middle ground confirms the winning candidate through `zrecipe.Recompress` over the spool (the pull code path) so the store-side check only composes and hashes.
-- Speculative pass two during pass one: tee zrecipe's decompressed stream (`Options.Uncompressed`) into tar-prism and the store writer, saving the second inflate and overlapping chunking and writes with the search (about 1.7 s on that layer). Objects written for a blob that ends up raw are left to GC; the error classification of `ingestPrism` has to survive the analysis failing after the decompose already finished.
-- Pass two overhead: a CPU profile of `ingestPrism` alone shows 1.9 s of wall time for under 0.5 s of hashing, chunking and zstd; the rest is one `WriteAt` syscall per object in amber-store-core's `appendLocked` and goroutine wakeups on the object channels and the append mutex among the GOMAXPROCS/2 writers. Batching appends belongs in amber-store-core; in this repo `emitBuffer` (8 objects, about 80 KiB with 10 KiB chunks) and `writers()` are worth tuning, and fewer writers may well be faster.
+- Speculative decompose during pass one: done (spec
+  `2026-09-05-speculative-decompose-design.md`); the second inflate is
+  gone and chunking overlaps the search. Left open from it: skipping
+  chunks already in the store at staging time (needs the collector's
+  write barrier around the staging window), and the pack format making a
+  staged blob transferable to a remote store.
+- Measured 2026-09-05 after the speculative decompose, `oci-amber import`
+  of `dmilhdef/lhh:82` (arm64), fresh store each time: sha256:54a144adda00
+  (26.9 MiB, gzip, go-flate) 3.95 s before, 3.62 s after; sha256:39a945af8df2
+  (28.4 MiB, gzip, zlib) 15.06 s before, 14.56 s after; total import 15.9 s
+  to 15.5 s. Remaining per-layer cost is the search and the round-trip
+  recompression.
+- The commit re-decodes and rehashes every staged record under
+  `WriteOpts.Verify`, which is the spec's deliberate choice: a staged
+  record passes exactly the gate a freshly built object passes. Should the
+  commit stage ever show up in a profile, the obvious lever is that these
+  records were produced in-process moments earlier, so a trusted fast path
+  that skips the rehash would be sound for them in a way it is not for a
+  pack that arrived from somewhere else.
+- Pass two overhead: a CPU profile of the former `ingestPrism` (now the pack commit) showed 1.9 s of wall time for under 0.5 s of hashing, chunking and zstd; the rest is one `WriteAt` syscall per object in amber-store-core's `appendLocked` and goroutine wakeups on the object channels and the append mutex among the GOMAXPROCS/2 writers. Batching appends belongs in amber-store-core; in this repo `emitBuffer` (8 objects, about 80 KiB with 10 KiB chunks) and `writers()` are worth tuning, and fewer writers may well be faster.
 - Search parallelism buys little: with 838 gzip candidates a non-reproducible 228 MiB layer costs 2.6 s at `--analyze-parallelism 1` and 1.35 s at 8, because the comparison aborts at the first divergent byte. Leave the default at 2.
 - Rootfs build: 1.2 s for 17.6k entries (0.4 s for 7.4k), mostly one `LookupKey` per regular file in `parseLayer`. Walking the prism's `blobs/` directory once in order, or parsing layers concurrently before applying them in order, would cut it.
 

@@ -268,7 +268,7 @@ func (t *Tracker) BlobStage(d oci.Digest, s blob.Stage) {
 	switch s {
 	case blob.StageAnalyze:
 		r.stageBase, r.stageShare = 0, 0.5
-	case blob.StageDecompose:
+	case blob.StageCommit:
 		r.stageBase = 0.5
 		if t.opts.Verify {
 			r.stageShare = 0.25

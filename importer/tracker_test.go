@@ -63,8 +63,8 @@ func TestTrackerFractionsThroughPrismStages(t *testing.T) {
 		t.Fatalf("counts = %+v", s.Counts)
 	}
 	tr.BlobProgress(digest("a"), 1000)
-	tr.BlobStage(digest("a"), blob.StageDecompose)
-	approx(t, "decompose start", rowFor(t, tr.Snapshot(), "a").Fraction, 0.5)
+	tr.BlobStage(digest("a"), blob.StageCommit)
+	approx(t, "commit start", rowFor(t, tr.Snapshot(), "a").Fraction, 0.5)
 	tr.BlobProgress(digest("a"), 1000)
 	tr.BlobStage(digest("a"), blob.StageVerify)
 	approx(t, "verify start", rowFor(t, tr.Snapshot(), "a").Fraction, 0.75)
@@ -78,15 +78,15 @@ func TestTrackerFractionsThroughPrismStages(t *testing.T) {
 	approx(t, "overall after a", s.Fraction, 0.25)
 }
 
-func TestTrackerWithoutVerifyDecomposeTakesHalf(t *testing.T) {
+func TestTrackerWithoutVerifyCommitTakesHalf(t *testing.T) {
 	tr := NewTracker(TrackerOptions{Verify: false, Now: time.Now})
 	tr.Queue(plan(map[string]int64{"a": 100}))
 	tr.StartBlobs()
 	tr.Start(digest("a"))
 	tr.BlobStage(digest("a"), blob.StageAnalyze)
-	tr.BlobStage(digest("a"), blob.StageDecompose)
+	tr.BlobStage(digest("a"), blob.StageCommit)
 	tr.BlobProgress(digest("a"), 50)
-	approx(t, "decompose half, no verify", rowFor(t, tr.Snapshot(), "a").Fraction, 0.75)
+	approx(t, "commit half, no verify", rowFor(t, tr.Snapshot(), "a").Fraction, 0.75)
 }
 
 func TestTrackerRawTakesTheRemainder(t *testing.T) {
@@ -99,14 +99,14 @@ func TestTrackerRawTakesTheRemainder(t *testing.T) {
 	tr.BlobStage(digest("a"), blob.StageRaw)
 	tr.BlobProgress(digest("a"), 50)
 	approx(t, "raw after analyze", rowFor(t, tr.Snapshot(), "a").Fraction, 0.75)
-	// raw after decompose (downgrade): 0.75 + 0.25 × n/size
+	// raw after commit (downgrade): 0.75 + 0.25 × n/size
 	tr.Start(digest("b"))
 	tr.BlobStage(digest("b"), blob.StageAnalyze)
-	tr.BlobStage(digest("b"), blob.StageDecompose)
+	tr.BlobStage(digest("b"), blob.StageCommit)
 	tr.BlobProgress(digest("b"), 100)
 	tr.BlobStage(digest("b"), blob.StageRaw)
 	tr.BlobProgress(digest("b"), 50)
-	approx(t, "raw after decompose", rowFor(t, tr.Snapshot(), "b").Fraction, 0.875)
+	approx(t, "raw after commit", rowFor(t, tr.Snapshot(), "b").Fraction, 0.875)
 	// progress in a stage never pushes the fraction past the stage's end
 	tr.BlobProgress(digest("b"), 100)
 	approx(t, "raw complete", rowFor(t, tr.Snapshot(), "b").Fraction, 1)

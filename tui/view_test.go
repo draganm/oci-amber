@@ -20,7 +20,7 @@ func blobSnapshot() importer.Snapshot {
 	return importer.Snapshot{
 		Phase: importer.PhaseBlobs,
 		Blobs: []importer.BlobRow{
-			{Digest: oci.DigestOfBytes([]byte("a")), Size: 1900727, State: importer.BlobInFlight, Stage: blob.StageDecompose, Fraction: 0.52, Progress: 950000},
+			{Digest: oci.DigestOfBytes([]byte("a")), Size: 1900727, State: importer.BlobInFlight, Stage: blob.StageCommit, Fraction: 0.52, Progress: 950000},
 			{Digest: oci.DigestOfBytes([]byte("b")), Size: 38 << 20, State: importer.BlobInFlight, Stage: blob.StageAnalyze, Fraction: 0.5, Progress: 38 << 20},
 			{Digest: oci.DigestOfBytes([]byte("c")), Size: 10, State: importer.BlobDone, Fraction: 1},
 			{Digest: oci.DigestOfBytes([]byte("d")), Size: 10, State: importer.BlobPresent, Fraction: 1},
@@ -41,7 +41,7 @@ func TestRenderViewBlobPhase(t *testing.T) {
 		"elapsed 0:42",
 		"1 done · 1 already present · 2 in flight · 1 pending · 1 raw",
 		ShortDigest(oci.DigestOfBytes([]byte("a"))) + "  1.8 MiB",
-		"decompose",
+		"commit",
 		"52%",
 		"analyze",
 		"searching…",

@@ -284,13 +284,13 @@ func (b *Store) buildRoot(w *store.Writer, meta Meta, files map[string]key.Key, 
 }
 
 // Put finalizes an upload (spec "Blob finalization" steps 2-9): whole-blob
-// dedup, finalize slot, analyze and classify, prism or raw ingest through
-// the accounting writer, blob root, oci/blob/<digest> ref, recent-uploads
-// entry, log line, spool removal. A prism whose pass two or round-trip
-// check fails is downgraded to raw with the recorded reason. On any error
-// nothing is published and the spool is left in place so the caller can
-// keep the session for a retry; on success the spool's backing file is
-// removed.
+// dedup, finalize slot, analyze, stage and classify, then the staged pack's
+// commit or the raw ingest through the accounting writer, blob root,
+// oci/blob/<digest> ref, recent-uploads entry, log line, spool removal. A
+// prism whose staging or round-trip check fails is downgraded to raw with
+// the recorded reason. On any error nothing is published and the spool is
+// left in place so the caller can keep the session for a retry; on success
+// the spool's backing file is removed.
 func (b *Store) Put(ctx context.Context, sp *upload.Spool) (*Meta, error) {
 	if sp == nil {
 		return nil, errors.New("blob: nil spool")
@@ -335,6 +335,7 @@ func (b *Store) Put(ctx context.Context, sp *upload.Spool) (*Meta, error) {
 	if err != nil {
 		return nil, err
 	}
+	defer dec.staged.drop()
 	meta := Meta{
 		Version:    MetaVersion,
 		Digest:     d,
@@ -346,11 +347,8 @@ func (b *Store) Put(ctx context.Context, sp *upload.Spool) (*Meta, error) {
 	var root key.Key
 	switch kind {
 	case KindPrism:
-		if dec.params == nil {
-			return nil, errors.New("blob: prism decision without params")
-		}
-		// Steps 6 and 8: pass two and the round-trip check.
-		res, stats, perr := b.finalizePrism(ctx, sp, dec.params, d)
+		// Commit the staged pack, then the round-trip check.
+		res, stats, perr := b.finalizePrism(ctx, dec, d, size)
 		var fb *rawFallback
 		switch {
 		case perr == nil:

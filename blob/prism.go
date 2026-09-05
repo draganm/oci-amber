@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -16,14 +15,12 @@ import (
 	"github.com/jobs-build/amber-store-core/key"
 	kpgzip "github.com/klauspost/compress/gzip"
 	"github.com/klauspost/compress/zstd"
-	"lukechampine.com/blake3"
 
 	"github.com/draganm/oci-amber/oci"
 	"github.com/draganm/oci-amber/store"
-	"github.com/draganm/oci-amber/upload"
 )
 
-// prismResult is what pass two leaves in the store before the blob root is
+// prismResult is what the commit leaves in the store before the blob root is
 // built: the keys of recipe.bin, recipe.json, blobs/ and comp.json, and the
 // facts that go into meta.json.
 type prismResult struct {
@@ -34,9 +31,9 @@ type prismResult struct {
 }
 
 // decomposeError reports that the decompressed stream could not be taken
-// apart: tar-prism rejected it, the decompressor failed, or the BLAKE3
-// digest or length differs from what pass one recorded. The blob is stored
-// raw with ReasonDecomposeFailed; the upload does not fail.
+// apart: tar-prism rejected it, or the stream the stager hashed differs
+// from what pass one recorded. The blob is stored raw with
+// ReasonDecomposeFailed; the upload does not fail.
 type decomposeError struct{ err error }
 
 func (e *decomposeError) Error() string { return "decompose: " + e.err.Error() }
@@ -65,13 +62,13 @@ type rawFallback struct {
 func (e *rawFallback) Error() string { return string(e.reason) + ": " + e.err.Error() }
 func (e *rawFallback) Unwrap() error { return e.err }
 
-// spoolReader tags errors coming from the upload spool so they can be told
-// apart from tar-prism and decompressor errors after DecomposeTo returns.
-// klauspost's gzip and zstd readers, tar-prism's bufio and io.TeeReader all
-// pass the underlying reader's error through unchanged.
-type spoolReader struct{ r io.Reader }
+// streamReader tags errors coming from the stream Analyze feeds the
+// stager, so they can be told apart from tar-prism and sink errors after
+// DecomposeTo returns. tar-prism's bufio and io.TeeReader pass the
+// underlying reader's error through unchanged.
+type streamReader struct{ r io.Reader }
 
-func (s *spoolReader) Read(p []byte) (int, error) {
+func (s *streamReader) Read(p []byte) (int, error) {
 	n, err := s.r.Read(p)
 	if err != nil && !errors.Is(err, io.EOF) {
 		err = &readError{err}
@@ -140,10 +137,11 @@ func newAmberSink(w *store.Writer) *amberSink {
 
 // closeRecipe closes the recipe writer if tar-prism ever requested one via
 // Recipe(). recipeWriter.Close is idempotent (guarded by sync.Once), so
-// ingestPrism can defer this right after newAmberSink and still let finish()
-// close the recipe again on the success path: a panic or an early return
-// from a failed DecomposeTo can never leave the PutStream goroutine feeding
-// recipe.bin blocked on the pipe waiting for a Close that never comes.
+// stage defers this right after newAmberSink and calls it again, in order,
+// once DecomposeTo returns, and finish() closes the recipe once more on the
+// success path: neither a panic nor an early return can leave the PutStream
+// goroutine feeding recipe.bin blocked on the recipe pipe, waiting for a
+// Close that never comes.
 func (s *amberSink) closeRecipe() {
 	if s.recipe != nil {
 		s.recipe.Close()
@@ -262,73 +260,16 @@ func (rw *recipeWriter) Close() error {
 	return nil
 }
 
-// ingestPrism runs pass two: reopen the spool at offset 0, decompress it
-// with klauspost, hash the stream with BLAKE3 and sha256, take the tar
-// apart into the store and write comp.json. It returns a *decomposeError
-// when the blob should fall back to raw and any other error when the upload
-// must fail.
-func (b *Store) ingestPrism(ctx context.Context, w *store.Writer, sp *upload.Spool, params *zrecipe.Params) (prismResult, error) {
-	src, err := sp.Open()
-	if err != nil {
-		return prismResult{}, fmt.Errorf("blob: opening spool: %w", err)
-	}
-	if c, ok := src.(io.Closer); ok {
-		defer c.Close()
-	}
-	if _, err := src.Seek(0, io.SeekStart); err != nil {
-		return prismResult{}, fmt.Errorf("blob: rewinding spool: %w", err)
-	}
-	rd := b.observeReader(sp.Digest(), src)
-
-	dec, err := newDecompressor(params.Format, &spoolReader{r: rd})
-	if err != nil {
-		var re *readError
-		if errors.As(err, &re) {
-			return prismResult{}, err
-		}
-		return prismResult{}, &decomposeError{err}
-	}
-	defer dec.Close()
-
-	b3 := blake3.New(32, nil)
-	s256 := sha256.New()
-	counter := &byteCounter{r: io.TeeReader(dec, io.MultiWriter(b3, s256))}
-
-	sink := newAmberSink(w)
-	defer sink.closeRecipe()
-	if err := tarprism.DecomposeTo(counter, sink); err != nil {
-		return prismResult{}, classifyDecomposeError(ctx, err)
-	}
-	recipe, blobs, err := sink.finish()
-	if err != nil {
-		return prismResult{}, err
-	}
-	if got := hex.EncodeToString(b3.Sum(nil)); got != params.Uncompressed.Blake3 || counter.n != params.Uncompressed.Size {
-		return prismResult{}, &decomposeError{fmt.Errorf("decompressed stream is %s/%d, pass one recorded %s/%d", got, counter.n, params.Uncompressed.Blake3, params.Uncompressed.Size)}
-	}
-	var comp bytes.Buffer
-	if err := params.Write(&comp); err != nil {
-		return prismResult{}, fmt.Errorf("blob: encoding %s: %w", CompFile, err)
-	}
-	compKey, err := w.PutBytes(comp.Bytes())
-	if err != nil {
-		return prismResult{}, fmt.Errorf("blob: storing %s: %w", CompFile, err)
-	}
-	return prismResult{
-		recipe:           recipe,
-		index:            sink.index,
-		blobs:            blobs,
-		comp:             compKey,
-		entries:          sink.entries,
-		diffID:           oci.DigestFromSum(s256.Sum(nil)),
-		uncompressedSize: counter.n,
-	}, nil
-}
-
-// classifyDecomposeError decides whether a DecomposeTo failure fails the
-// upload (request context done, spool I/O, amber write) or downgrades the
-// blob to raw (anything else: tar-prism rejecting the archive, the
-// decompressor failing).
+// classifyDecomposeError decides what a staging failure means. The request
+// context ending outranks everything else and fails the upload, whatever
+// the stager tripped over on its way out. A *readError comes from the
+// stream Analyze feeds the stager, so it can only appear once Analyze
+// itself failed, and the upload fails on Analyze's error; a *sinkError
+// comes from the pack writer or the store and fails the upload too.
+// Anything else is tar-prism rejecting the archive, which downgrades the
+// blob to raw. An error that already carries a *decomposeError is returned
+// as it is rather than wrapped again, so a log line never reads
+// "decompose: decompose: ...".
 func classifyDecomposeError(ctx context.Context, err error) error {
 	if cerr := ctx.Err(); cerr != nil {
 		return cerr
@@ -341,21 +282,29 @@ func classifyDecomposeError(ctx context.Context, err error) error {
 	if errors.As(err, &re) {
 		return err
 	}
+	var de *decomposeError
+	if errors.As(err, &de) {
+		return err
+	}
 	return &decomposeError{err}
 }
 
-// finalizePrism runs pass two through its own accounting writer and, when
-// VerifyRoundTrip is set, the pull pipeline over the fresh objects. It
-// returns a *rawFallback when the spec stores the blob raw instead
-// (decompose-failed, roundtrip-failed; both logged at error level), the
-// context's error when the request went away, and any other error when the
-// upload must fail. Objects written before a failure are left to GC.
-func (b *Store) finalizePrism(ctx context.Context, sp *upload.Spool, params *zrecipe.Params, d oci.Digest) (prismResult, store.Stats, error) {
-	w := b.st.NewWriter(ctx)
-	b.observeStage(d, StageDecompose)
-	res, err := b.ingestPrism(ctx, w, sp, params)
-	if err != nil {
-		w.Abort()
+// finalizePrism commits a staged prism (spec "Blob orchestration"): the
+// staging outcome is judged first, then the pack and comp.json go into the
+// store through one accounting writer, then, when VerifyRoundTrip is set,
+// the pull pipeline runs over the fresh objects. It returns a *rawFallback
+// when the spec stores the blob raw instead (decompose-failed,
+// roundtrip-failed; both logged at error level), the context's error when
+// the request went away, and any other error when the upload must fail.
+// Objects written before a failure are left to GC; the pack is released
+// on every path.
+func (b *Store) finalizePrism(ctx context.Context, dec decision, d oci.Digest, size int64) (prismResult, store.Stats, error) {
+	s, params := dec.staged, dec.params
+	if s == nil || params == nil {
+		return prismResult{}, store.Stats{}, errors.New("blob: prism decision without params or a staged pack")
+	}
+	defer s.drop()
+	if err := s.check(params); err != nil {
 		if cerr := ctx.Err(); cerr != nil {
 			return prismResult{}, store.Stats{}, cerr
 		}
@@ -363,6 +312,16 @@ func (b *Store) finalizePrism(ctx context.Context, sp *upload.Spool, params *zre
 		if errors.As(err, &de) {
 			b.log.Error("decompose failed, storing raw", "digest", d, "format", params.Format, "engine", params.Engine, "error", err)
 			return prismResult{}, store.Stats{}, &rawFallback{reason: ReasonDecomposeFailed, err: err}
+		}
+		return prismResult{}, store.Stats{}, err
+	}
+	b.observeStage(d, StageCommit)
+	w := b.st.NewWriter(ctx)
+	res, err := b.commit(w, s, params, d, size)
+	if err != nil {
+		w.Abort()
+		if cerr := ctx.Err(); cerr != nil {
+			return prismResult{}, store.Stats{}, cerr
 		}
 		return prismResult{}, store.Stats{}, err
 	}
@@ -389,6 +348,40 @@ func (b *Store) finalizePrism(ctx context.Context, sp *upload.Spool, params *zre
 		}
 	}
 	return res, stats, nil
+}
+
+// commit inserts the staged pack and comp.json through w. Progress is the
+// pack bytes read scaled to the blob's compressed size, so the commit
+// stage ends exactly at size whatever the pack's length.
+func (b *Store) commit(w *store.Writer, s *staged, params *zrecipe.Params, d oci.Digest, size int64) (prismResult, error) {
+	var progress func(int64)
+	if b.opts.Observer != nil && s.pack.Size() > 0 {
+		packSize := float64(s.pack.Size())
+		progress = func(read int64) {
+			b.observeProgress(d, min(size, int64(float64(read)/packSize*float64(size))))
+		}
+	}
+	if err := w.AddPack(s.pack, progress); err != nil {
+		return prismResult{}, fmt.Errorf("blob: inserting staged pack: %w", err)
+	}
+	var comp bytes.Buffer
+	if err := params.Write(&comp); err != nil {
+		return prismResult{}, fmt.Errorf("blob: encoding %s: %w", CompFile, err)
+	}
+	compKey, err := w.PutBytes(comp.Bytes())
+	if err != nil {
+		return prismResult{}, fmt.Errorf("blob: storing %s: %w", CompFile, err)
+	}
+	b.observeProgress(d, size)
+	return prismResult{
+		recipe:           s.recipe,
+		index:            s.index,
+		blobs:            s.blobs,
+		comp:             compKey,
+		entries:          s.entries,
+		diffID:           s.diffID,
+		uncompressedSize: s.size,
+	}, nil
 }
 
 // roundTripCheck runs the pull pipeline over freshly ingested prism objects
