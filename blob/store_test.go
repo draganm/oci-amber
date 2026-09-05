@@ -264,3 +264,41 @@ func TestPutEmptyArchive(t *testing.T) {
 		})
 	}
 }
+
+func TestReadOnlyStoreReadsButRefusesWrites(t *testing.T) {
+	rw, st, _ := newTestStore(t, Options{})
+	data := gzipBytes(t, tarBytes(t, "hello.txt", []byte("hello\n")), gzip.DefaultCompression)
+	meta, err := rw.Put(t.Context(), spoolOf(data))
+	if err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	ro := NewReadOnly(st, nil)
+	if _, err := ro.Put(t.Context(), spoolOf([]byte("x"))); !errors.Is(err, ErrReadOnly) {
+		t.Fatalf("read-only Put returned %v, want ErrReadOnly", err)
+	}
+	if err := ro.Delete(meta.Digest); !errors.Is(err, ErrReadOnly) {
+		t.Fatalf("read-only Delete returned %v, want ErrReadOnly", err)
+	}
+	ok, err := ro.Exists(meta.Digest)
+	if err != nil || !ok {
+		t.Fatalf("Exists = %v, %v; want true", ok, err)
+	}
+	bl, err := ro.Open(meta.Digest)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if bl.Meta.Kind != KindPrism {
+		t.Fatalf("kind %s, want prism", bl.Meta.Kind)
+	}
+	if _, err := bl.Prism(); err != nil {
+		t.Fatalf("Prism: %v", err)
+	}
+	var out bytes.Buffer
+	if err := bl.WriteTo(t.Context(), &out); err != nil {
+		t.Fatalf("WriteTo: %v", err)
+	}
+	if !bytes.Equal(out.Bytes(), data) {
+		t.Fatal("read-only pull differs from what was put")
+	}
+}

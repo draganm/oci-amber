@@ -28,6 +28,8 @@ var (
 	// blob's digest. They have already been written; the caller must abort
 	// the response rather than finish it.
 	ErrDigestMismatch = errors.New("blob: served bytes do not match digest")
+	// ErrReadOnly reports Put or Delete on a Store made by NewReadOnly.
+	ErrReadOnly = errors.New("blob: store is read-only")
 )
 
 // blobsDirName is the prism blobs directory inside a blob root; it equals
@@ -61,6 +63,7 @@ type Store struct {
 	digests  keyedmutex.Mutex[oci.Digest] // one finalization per digest at a time
 	recentMu sync.Mutex
 	recent   map[oci.Digest]recentEntry
+	readOnly bool
 }
 
 // recentEntry is one row of the recent-uploads table.
@@ -113,6 +116,18 @@ func New(st *store.Store, opts Options, log *slog.Logger) (*Store, error) {
 		finalize: make(chan struct{}, opts.MaxConcurrentFinalize),
 		recent:   make(map[oci.Digest]recentEntry),
 	}, nil
+}
+
+// NewReadOnly returns a Store over st that only reads: Open, Exists and
+// the pull path work, Put and Delete return ErrReadOnly. It needs no work
+// directory and creates or deletes nothing, so a tool that only looks at
+// a store (`oci-amber browse`) opens it without side effects. A nil log
+// uses slog.Default.
+func NewReadOnly(st *store.Store, log *slog.Logger) *Store {
+	if log == nil {
+		log = slog.Default()
+	}
+	return &Store{st: st, log: log, readOnly: true, recent: make(map[oci.Digest]recentEntry)}
 }
 
 // emptyDir removes every entry of dir, leaving dir itself in place.
@@ -177,6 +192,9 @@ func (b *Store) readMeta(root key.Key) (Meta, error) {
 // Delete removes oci/blob/<d>; the objects become garbage for amber's
 // collector. It waits for a finalization of the same digest to finish.
 func (b *Store) Delete(d oci.Digest) error {
+	if b.readOnly {
+		return ErrReadOnly
+	}
 	unlock := b.digests.Lock(d)
 	defer unlock()
 	err := b.st.DeleteRef(RefName(d))
@@ -276,6 +294,9 @@ func (b *Store) buildRoot(w *store.Writer, meta Meta, files map[string]key.Key, 
 func (b *Store) Put(ctx context.Context, sp *upload.Spool) (*Meta, error) {
 	if sp == nil {
 		return nil, errors.New("blob: nil spool")
+	}
+	if b.readOnly {
+		return nil, ErrReadOnly
 	}
 	d := sp.Digest()
 	size := sp.Size()
