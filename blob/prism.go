@@ -137,10 +137,11 @@ func newAmberSink(w *store.Writer) *amberSink {
 
 // closeRecipe closes the recipe writer if tar-prism ever requested one via
 // Recipe(). recipeWriter.Close is idempotent (guarded by sync.Once), so
-// stage calls this right after DecomposeTo returns and still lets finish()
-// close the recipe again on the success path: a panic or an early return
-// from a failed DecomposeTo can never leave the PutStream goroutine feeding
-// recipe.bin blocked on the pipe waiting for a Close that never comes.
+// stage defers this right after newAmberSink and calls it again, in order,
+// once DecomposeTo returns, and finish() closes the recipe once more on the
+// success path: neither a panic nor an early return can leave the PutStream
+// goroutine feeding recipe.bin blocked on the recipe pipe, waiting for a
+// Close that never comes.
 func (s *amberSink) closeRecipe() {
 	if s.recipe != nil {
 		s.recipe.Close()
@@ -259,10 +260,16 @@ func (rw *recipeWriter) Close() error {
 	return nil
 }
 
-// classifyDecomposeError decides whether a DecomposeTo failure fails the
-// upload (request context done, spool I/O, amber write) or downgrades the
-// blob to raw (anything else: tar-prism rejecting the archive, the
-// decompressor failing).
+// classifyDecomposeError decides what a staging failure means. The request
+// context ending outranks everything else and fails the upload, whatever
+// the stager tripped over on its way out. A *readError comes from the
+// stream Analyze feeds the stager, so it can only appear once Analyze
+// itself failed, and the upload fails on Analyze's error; a *sinkError
+// comes from the pack writer or the store and fails the upload too.
+// Anything else is tar-prism rejecting the archive, which downgrades the
+// blob to raw. An error that already carries a *decomposeError is returned
+// as it is rather than wrapped again, so a log line never reads
+// "decompose: decompose: ...".
 func classifyDecomposeError(ctx context.Context, err error) error {
 	if cerr := ctx.Err(); cerr != nil {
 		return cerr
@@ -273,6 +280,10 @@ func classifyDecomposeError(ctx context.Context, err error) error {
 	}
 	var re *readError
 	if errors.As(err, &re) {
+		return err
+	}
+	var de *decomposeError
+	if errors.As(err, &de) {
 		return err
 	}
 	return &decomposeError{err}

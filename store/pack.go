@@ -75,8 +75,11 @@ func (w *Writer) runPack() {
 // stage drains the item channel into the pack file until the channel is
 // closed or the context ends. writers() goroutines encode; a mutex
 // serializes their appends and the accounting. The first failure cancels
-// the others and is returned; the file is left as it is for settle to
-// release.
+// the other encoders and poisons the Writer itself, so a caller still
+// emitting fails at once on the cancellation cause instead of filling the
+// queue with objects no backend will ever write; the same error is
+// returned and, since finish reads werr before the cause, Close reports
+// it unchanged. The file is left as it is for settle to release.
 func (w *Writer) stage() error {
 	pw := amberpack.NewWriter(w.pack.f)
 	ctx, stop := context.WithCancelCause(w.ctx)
@@ -103,6 +106,7 @@ func (w *Writer) stage() error {
 				rec, err := amberpack.EncodeRecord(it.obj.Key, it.obj.Data)
 				if err != nil {
 					stop(err)
+					w.cancel(err)
 					return
 				}
 				mu.Lock()
@@ -112,7 +116,9 @@ func (w *Writer) stage() error {
 				}
 				mu.Unlock()
 				if err != nil {
-					stop(fmt.Errorf("store: writing pack: %w", err))
+					err = fmt.Errorf("store: writing pack: %w", err)
+					stop(err)
+					w.cancel(err)
 					return
 				}
 			}

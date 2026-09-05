@@ -132,7 +132,7 @@ func (b *Store) analyze(ctx context.Context, sp *upload.Spool) (decision, error)
 
 	// A compressed blob whose first decompressed block is not a tar header
 	// can never become a prism, so decide it here rather than after a full
-	// engine search and a pass two that tar-prism is bound to reject (spec
+	// engine search and a staging that tar-prism is bound to reject (spec
 	// "Blob finalization" step 5). The probe decompresses one 512-byte
 	// block through klauspost; nothing is spooled.
 	if f != zrecipe.FormatNone {
@@ -224,6 +224,7 @@ func (b *Store) stage(ctx context.Context, p *pipe, w *store.Writer) *staged {
 	s256 := sha256.New()
 	counter := &byteCounter{r: io.TeeReader(&streamReader{r: p}, io.MultiWriter(b3, s256))}
 	sink := newAmberSink(w)
+	defer sink.closeRecipe()
 	err := tarprism.DecomposeTo(counter, sink)
 	sink.closeRecipe()
 	// Read whatever is left of the stream so Analyze never blocks on a

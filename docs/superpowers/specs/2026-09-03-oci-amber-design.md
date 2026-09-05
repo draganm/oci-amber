@@ -279,7 +279,7 @@ the upload proceeds and step 2 catches it.
    bound, the compressed tar-header probe, and the uncompressed
    tar-header probe for streams `Detect` reports as `none`; each decides
    raw `not-tar` or `unsupported` without staging anything),
-   `zrecipe.Analyze(ctx, spool, &Options{TempDir: <work-dir>/spool,
+   `zrecipe.Analyze(ctx, spool, &Options{TempDir: <work-dir>/oci-amber/spool,
    MaxInMemory: --max-in-memory, Parallelism: --analyze-parallelism
    (default 2), Uncompressed: pipe})` runs under a child context with
    `--analyze-timeout` (default 15 min). The pipe carries the decompressed
@@ -287,8 +287,8 @@ the upload proceeds and step 2 catches it.
    `tarprism.DecomposeTo` with the amber sink over a pack-backed
    `store.Writer`: the recipe, the index and every file content are built
    exactly as for the store and encoded as records into an unlinked temp
-   pack under `<work-dir>/spool`. The stager always reads the pipe to its
-   end, so it never blocks or fails `Analyze`. See
+   pack under `<work-dir>/oci-amber/spool`. The stager always reads the
+   pipe to its end, so it never blocks or fails `Analyze`. See
    `2026-09-05-speculative-decompose-design.md`.
 5. **Classify.**
    - `Params.Format` gzip, zstd or none with staging succeeded: prism

@@ -159,7 +159,14 @@ Measured on an M4 Pro with real Docker Hub layers. For a 61 MiB go-flate layer (
   (28.4 MiB, gzip, zlib) 15.06 s before, 14.56 s after; total import 15.9 s
   to 15.5 s. Remaining per-layer cost is the search and the round-trip
   recompression.
-- Pass two overhead: a CPU profile of `ingestPrism` alone shows 1.9 s of wall time for under 0.5 s of hashing, chunking and zstd; the rest is one `WriteAt` syscall per object in amber-store-core's `appendLocked` and goroutine wakeups on the object channels and the append mutex among the GOMAXPROCS/2 writers. Batching appends belongs in amber-store-core; in this repo `emitBuffer` (8 objects, about 80 KiB with 10 KiB chunks) and `writers()` are worth tuning, and fewer writers may well be faster.
+- The commit re-decodes and rehashes every staged record under
+  `WriteOpts.Verify`, which is the spec's deliberate choice: a staged
+  record passes exactly the gate a freshly built object passes. Should the
+  commit stage ever show up in a profile, the obvious lever is that these
+  records were produced in-process moments earlier, so a trusted fast path
+  that skips the rehash would be sound for them in a way it is not for a
+  pack that arrived from somewhere else.
+- Pass two overhead: a CPU profile of the former `ingestPrism` (now the pack commit) showed 1.9 s of wall time for under 0.5 s of hashing, chunking and zstd; the rest is one `WriteAt` syscall per object in amber-store-core's `appendLocked` and goroutine wakeups on the object channels and the append mutex among the GOMAXPROCS/2 writers. Batching appends belongs in amber-store-core; in this repo `emitBuffer` (8 objects, about 80 KiB with 10 KiB chunks) and `writers()` are worth tuning, and fewer writers may well be faster.
 - Search parallelism buys little: with 838 gzip candidates a non-reproducible 228 MiB layer costs 2.6 s at `--analyze-parallelism 1` and 1.35 s at 8, because the comparison aborts at the first divergent byte. Leave the default at 2.
 - Rootfs build: 1.2 s for 17.6k entries (0.4 s for 7.4k), mostly one `LookupKey` per regular file in `parseLayer`. Walking the prism's `blobs/` directory once in order, or parsing layers concurrently before applying them in order, would cut it.
 

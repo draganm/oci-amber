@@ -185,6 +185,15 @@ Outcomes:
 | params | `decomposeError`, or BLAKE3 or length differ from `params.Uncompressed` | raw `decompose-failed`, logged at error; pack dropped |
 | params | ok | commit |
 
+One deliberate deviation from that table: the pack file is created before
+`Analyze` runs, and a failure there fails the upload outright, even for a
+blob that would have ended up raw. An unwritable or full
+`<work-dir>/oci-amber/spool` is an operator problem, not a property of the
+blob, and it is worth failing fast on: zrecipe's own spool lives in the
+same directory, so any blob past `--max-in-memory` would fail there a
+moment later anyway, and quietly storing the small ones raw would hide a
+broken work directory until it did real damage.
+
 Commit, in `finalizePrism`: a live writer takes `AddPack`, then comp.json
 through `PutBytes`; `Close` yields the blob's stats. Then, unchanged,
 the round-trip check when `VerifyRoundTrip` is set (a failure downgrades
