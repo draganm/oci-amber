@@ -19,7 +19,11 @@ func RenderReport(r *importer.Report, archive string) string {
 		for i, n := range e.Names {
 			names[i] = n.String()
 		}
-		fmt.Fprintf(&b, "  %s   %s   %s   %s\n", strings.Join(names, ", "), shortRef(e), kindOf(e), rootfsOf(e))
+		fields := []string{strings.Join(names, ", "), shortRef(e), kindOf(e)}
+		if rf := rootfsOf(e); rf != "" {
+			fields = append(fields, rf)
+		}
+		fmt.Fprintf(&b, "  %s\n", strings.Join(fields, "   "))
 	}
 	b.WriteString("\n")
 	fmt.Fprintf(&b, "%-15s %s\n", "Blobs", blobsLine(r.Blobs))
@@ -47,6 +51,7 @@ func RenderReport(r *importer.Report, archive string) string {
 	return b.String()
 }
 
+// shortRef abbreviates an entry's digest as "sha256:xxxx…xxxx".
 func shortRef(e importer.EntryReport) string {
 	h := e.Digest.Hex()
 	if len(h) >= 8 {
@@ -55,6 +60,7 @@ func shortRef(e importer.EntryReport) string {
 	return e.Digest.String()
 }
 
+// kindOf describes an entry as "manifest" or an index's platform/attestation counts.
 func kindOf(e importer.EntryReport) string {
 	if !e.IsIndex {
 		return "manifest"
@@ -62,6 +68,7 @@ func kindOf(e importer.EntryReport) string {
 	return fmt.Sprintf("index, %s + %s", plural(e.Platforms, "platform"), plural(e.Attestations, "attestation"))
 }
 
+// rootfsOf summarizes an entry's rootfs outcome, or "" when it has none.
 func rootfsOf(e importer.EntryReport) string {
 	switch len(e.Rootfs) {
 	case 0:
@@ -82,6 +89,7 @@ func rootfsOf(e importer.EntryReport) string {
 	return fmt.Sprintf("rootfs %d/%d ok", ok, len(e.Rootfs))
 }
 
+// blobsLine summarizes how many blobs were processed, stored and already present.
 func blobsLine(c importer.BlobCounts) string {
 	total := c.Processed + c.Present
 	if c.Processed == 0 {
@@ -91,6 +99,7 @@ func blobsLine(c importer.BlobCounts) string {
 	return fmt.Sprintf("%d processed: %s, %d already present", total, stored, c.Present)
 }
 
+// rawReasons renders why blobs were stored raw, e.g. ": 1 not-tar".
 func rawReasons(m map[blob.RawReason]int) string {
 	if len(m) == 0 {
 		return ""
@@ -111,6 +120,7 @@ func rawReasons(m map[blob.RawReason]int) string {
 	return ": " + strings.Join(parts, ", ")
 }
 
+// plural renders n with word, pluralized ("1 platform", "2 platforms").
 func plural(n int, word string) string {
 	if n == 1 {
 		return fmt.Sprintf("1 %s", word)

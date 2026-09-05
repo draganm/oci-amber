@@ -8,7 +8,7 @@ import (
 )
 
 func TestFormatBytes(t *testing.T) {
-	cases := map[int64]string{0: "0 B", 512: "512 B", 1023: "1023 B", 1024: "1.0 KiB", 1900727: "1.8 MiB", 4388352: "4.2 MiB", 5 << 30: "5.0 GiB"}
+	cases := map[int64]string{0: "0 B", 512: "512 B", 1023: "1023 B", 1024: "1.0 KiB", 1900727: "1.8 MiB", 4388352: "4.2 MiB", 5 << 30: "5.0 GiB", 1048575: "1.0 MiB", 1073741823: "1.0 GiB", 1048530: "1.0 MiB"}
 	for in, want := range cases {
 		if got := FormatBytes(in); got != want {
 			t.Errorf("FormatBytes(%d) = %q, want %q", in, got, want)

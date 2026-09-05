@@ -69,6 +69,27 @@ func TestRenderReportNothingAdded(t *testing.T) {
 	}
 }
 
+func TestRenderReportNoRootfs(t *testing.T) {
+	r := sampleReport()
+	r.Entries[0].Rootfs = nil
+	out := RenderReport(r, "b.tar")
+	var entryLine string
+	for _, line := range strings.Split(out, "\n") {
+		if strings.Contains(line, "busybox:1.37") {
+			entryLine = line
+		}
+	}
+	if entryLine == "" {
+		t.Fatalf("report has no entry line:\n%s", out)
+	}
+	if !strings.HasSuffix(entryLine, "attestation") {
+		t.Errorf("entry line = %q, want it to end right after the kind (no rootfs field, no trailing spaces)", entryLine)
+	}
+	if strings.Contains(out, "  \n") {
+		t.Errorf("report has a line with trailing whitespace:\n%s", out)
+	}
+}
+
 func TestRenderReportManifestEntryAndSeveralRootfs(t *testing.T) {
 	r := sampleReport()
 	r.Entries[0].IsIndex = false

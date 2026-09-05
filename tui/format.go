@@ -18,7 +18,9 @@ func FormatBytes(n int64) string {
 	}
 	f := float64(n) / unit
 	for _, suffix := range []string{"KiB", "MiB", "GiB", "TiB", "PiB"} {
-		if f < unit {
+		// 1023.95 is the point where "%.1f" would round up to "1024.0": roll
+		// over to the next unit before that happens rather than after.
+		if f < 1023.95 {
 			return fmt.Sprintf("%.1f %s", f, suffix)
 		}
 		f /= unit
@@ -46,12 +48,18 @@ func FormatCount(n int64) string {
 	return b.String()
 }
 
+// hms decomposes d, rounded to the second, into hours, minutes and seconds.
+func hms(d time.Duration) (h, m, s int) {
+	d = d.Round(time.Second)
+	h = int(d / time.Hour)
+	m = int(d/time.Minute) % 60
+	s = int(d/time.Second) % 60
+	return h, m, s
+}
+
 // FormatClock renders elapsed time as m:ss or h:mm:ss.
 func FormatClock(d time.Duration) string {
-	d = d.Round(time.Second)
-	h := int(d / time.Hour)
-	m := int(d/time.Minute) % 60
-	s := int(d/time.Second) % 60
+	h, m, s := hms(d)
 	if h > 0 {
 		return fmt.Sprintf("%d:%02d:%02d", h, m, s)
 	}
@@ -60,10 +68,7 @@ func FormatClock(d time.Duration) string {
 
 // FormatShort renders a duration as 42s, 2m10s or 1h03m.
 func FormatShort(d time.Duration) string {
-	d = d.Round(time.Second)
-	h := int(d / time.Hour)
-	m := int(d/time.Minute) % 60
-	s := int(d/time.Second) % 60
+	h, m, s := hms(d)
 	switch {
 	case h > 0:
 		return fmt.Sprintf("%dh%02dm", h, m)
