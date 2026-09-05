@@ -345,3 +345,71 @@ func TestDockerReference(t *testing.T) {
 		}
 	}
 }
+
+// TestWriteManifestWithoutConfig: an artifact manifest has no config, so it
+// gets no manifest.json entry; as the first child of an index it is passed
+// over for one that has a config.
+func TestWriteManifestWithoutConfig(t *testing.T) {
+	src := newMemSource()
+	layer := src.addBlob("application/vnd.example.data", []byte("artifact payload"))
+	body, _ := json.Marshal(oci.Manifest{SchemaVersion: 2, MediaType: oci.MediaTypeOCIManifest, ArtifactType: "application/vnd.example", Layers: []oci.Descriptor{layer}})
+	art := oci.Descriptor{MediaType: oci.MediaTypeOCIManifest, Digest: oci.DigestOfBytes(body), Size: int64(len(body))}
+	src.manifests[art.Digest] = body
+
+	archive, a := write(t, src, WriteOptions{}, Export{Repo: "art", Digest: art.Digest, MediaType: art.MediaType, Tag: "v1"})
+	if a.Legacy != nil {
+		t.Errorf("manifest.json should be absent for an artifact, got %+v", a.Legacy)
+	}
+	for _, e := range entries(t, archive) {
+		if strings.HasPrefix(e, "manifest.json") {
+			t.Errorf("manifest.json written: %s", e)
+		}
+	}
+	if b, err := a.ReadBlob(layer.Digest); err != nil || !bytes.Equal(b, src.blobs[layer.Digest]) {
+		t.Errorf("artifact layer: %v", err)
+	}
+
+	img := src.addImage(`{}`, []string{"l"}, &oci.Platform{OS: "linux", Architecture: "amd64"}, nil)
+	idx := src.addIndex(art, img)
+	_, a = write(t, src, WriteOptions{}, Export{Repo: "mixed", Digest: idx.Digest, MediaType: idx.MediaType, Tag: "v1"})
+	m, _ := oci.ParseManifest(src.manifests[img.Digest])
+	if len(a.Legacy) != 1 || a.Legacy[0].Config != "blobs/sha256/"+m.Config.Digest.Hex() {
+		t.Errorf("manifest.json = %+v, want the image child's config", a.Legacy)
+	}
+}
+
+// sizedSource wraps a Source and writes delta bytes more (or fewer) than
+// the blob holds.
+type sizedSource struct {
+	Source
+	delta int
+}
+
+func (s sizedSource) Blob(ctx context.Context, d oci.Digest, w io.Writer) error {
+	var buf bytes.Buffer
+	if err := s.Source.Blob(ctx, d, &buf); err != nil {
+		return err
+	}
+	b := buf.Bytes()
+	if s.delta < 0 {
+		b = b[:len(b)+s.delta]
+	} else {
+		b = append(b, bytes.Repeat([]byte{0}, s.delta)...)
+	}
+	_, err := w.Write(b)
+	return err
+}
+
+func TestWriteBlobSizeMismatch(t *testing.T) {
+	src := newMemSource()
+	img := src.addImage(`{}`, []string{"layer bytes"}, nil, nil)
+	export := []Export{{Repo: "x", Digest: img.Digest, MediaType: img.MediaType, Tag: "v1"}}
+	err := Write(context.Background(), io.Discard, sizedSource{src, -1}, export, WriteOptions{})
+	if err == nil || !strings.Contains(err.Error(), "its descriptor says") {
+		t.Errorf("short blob: %v", err)
+	}
+	err = Write(context.Background(), io.Discard, sizedSource{src, 1}, export, WriteOptions{})
+	if err == nil || !errors.Is(err, tar.ErrWriteTooLong) {
+		t.Errorf("long blob: %v", err)
+	}
+}

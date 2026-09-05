@@ -26,7 +26,7 @@ type saveConfig struct {
 	Output string   // "" or "-" means stdout
 	Refs   []string // repo, repo:tag or repo@digest, validated
 	// Platform is the platform whose child an index's manifest.json entry
-	// describes; nil means the host's.
+	// describes; nil means hostPlatform().
 	Platform *oci.Platform
 	Stdout   io.Writer // nil means os.Stdout
 	Stderr   io.Writer // nil means os.Stderr
@@ -100,6 +100,17 @@ func parseSaveRef(s string) (saveRef, error) {
 	return r, nil
 }
 
+// hostPlatform is the platform docker would pick on this machine: its
+// architecture, on linux unless the host is windows, since a darwin
+// client's daemon runs in a linux VM.
+func hostPlatform() *oci.Platform {
+	os := "linux"
+	if runtime.GOOS == "windows" {
+		os = "windows"
+	}
+	return &oci.Platform{OS: os, Architecture: runtime.GOARCH}
+}
+
 // runSave opens the store read-only, resolves every reference, then writes
 // one `docker image save` archive of them to the output. References are
 // resolved before the output is created, so an unknown one leaves nothing
@@ -123,15 +134,23 @@ func runSave(ctx context.Context, cfg saveConfig) error {
 	if err != nil {
 		return err
 	}
-	defer ro.Close()
+	err = writeArchive(ctx, ro, cfg, stdout, toFile)
+	if errors.Is(err, context.Canceled) {
+		err = errors.New("save cancelled")
+	}
+	return errors.Join(err, ro.Close())
+}
 
+// writeArchive resolves the references and writes the archive to the
+// output file, or to stdout when toFile is false.
+func writeArchive(ctx context.Context, ro *readOnlyStore, cfg saveConfig, stdout io.Writer, toFile bool) error {
 	exports, err := resolveExports(ro.images, cfg.Refs)
 	if err != nil {
 		return err
 	}
 	platform := cfg.Platform
 	if platform == nil {
-		platform = &oci.Platform{OS: runtime.GOOS, Architecture: runtime.GOARCH}
+		platform = hostPlatform()
 	}
 
 	out := stdout
@@ -148,24 +167,28 @@ func runSave(ctx context.Context, cfg saveConfig) error {
 		err = bw.Flush()
 	}
 	if f != nil {
+		// Only a regular file is removed after a failure: -o /dev/stdout
+		// or a fifo is not ours to unlink.
+		regular := false
+		if st, serr := f.Stat(); serr == nil && st.Mode().IsRegular() {
+			regular = true
+		}
 		if cerr := f.Close(); err == nil && cerr != nil {
 			err = fmt.Errorf("writing %s: %w", cfg.Output, cerr)
 		}
-		if err != nil {
+		if err != nil && regular {
 			os.Remove(cfg.Output)
 		}
 	}
-	if err != nil {
-		return err
-	}
-	return ro.Close()
+	return err
 }
 
 // resolveExports turns references into the images to save: a bare
-// repository contributes every tag, in tag order. A reference that does
-// not exist is an error.
+// repository contributes every tag, in tag order; an image named twice is
+// saved once. A reference that does not exist is an error.
 func resolveExports(images *image.Store, refs []string) ([]dockerarchive.Export, error) {
 	var exports []dockerarchive.Export
+	seen := map[dockerarchive.Export]bool{}
 	// add opens one tag or digest reference; r names it in errors.
 	add := func(r saveRef) error {
 		reference := r.tag
@@ -179,7 +202,11 @@ func resolveExports(images *image.Store, refs []string) ([]dockerarchive.Export,
 		if err != nil {
 			return err
 		}
-		exports = append(exports, dockerarchive.Export{Repo: r.repo, Digest: im.Meta.Digest, MediaType: im.Meta.MediaType, Tag: r.tag})
+		e := dockerarchive.Export{Repo: r.repo, Digest: im.Meta.Digest, MediaType: im.Meta.MediaType, Tag: r.tag}
+		if !seen[e] {
+			seen[e] = true
+			exports = append(exports, e)
+		}
 		return nil
 	}
 	for _, s := range refs {

@@ -228,7 +228,9 @@ verified, and manifests are the stored bytes, so what `docker image
 inspect` shows after a load is what the store holds. An index is saved
 whole, every platform and attestation included; its `manifest.json`
 entry, the one Docker's graph-driver loader reads, describes the child
-for the host's platform, or the first platform child when none matches.
+for the host's architecture on linux (windows on a windows host), or the
+first child that is an image with a config when none matches. An artifact
+manifest, which has no config, gets no `manifest.json` entry.
 `index.json` names the image the way docker does (`io.containerd.image.name`
 is `docker.io/library/busybox:1.37` for `busybox:1.37`); an image saved by
 digest has no name, and `import` needs `--name` for it. The archive is a

@@ -55,6 +55,8 @@ func runBrowse(ctx context.Context, cfg browseConfig) error {
 	if stderr == nil {
 		stderr = os.Stderr
 	}
+	// openReadOnly checks this again; it is checked here first so a
+	// missing store is reported before a missing terminal.
 	if err := checkStoreExists(cfg.Store); err != nil {
 		return err
 	}

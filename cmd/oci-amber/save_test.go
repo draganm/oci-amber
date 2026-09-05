@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -299,5 +300,47 @@ func TestRunSaveRefusesMissingStore(t *testing.T) {
 	err := runSave(context.Background(), saveConfig{Store: dir, Refs: []string{"a:b"}, Stdout: io.Discard, Stderr: io.Discard})
 	if err == nil || !strings.Contains(err.Error(), "no oci-amber store at "+dir) {
 		t.Fatalf("missing store: %v", err)
+	}
+}
+
+// TestRunSaveRemovesOutputOnFailure: a failure while writing leaves no
+// partial file behind. A cancelled context fails the first blob.
+func TestRunSaveRemovesOutputOnFailure(t *testing.T) {
+	f := newFixture(t)
+	out := filepath.Join(t.TempDir(), "partial.tar")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err := runSave(ctx, saveConfig{Store: f.store, Refs: []string{"demo/app:v1"}, Output: out, Stdout: io.Discard, Stderr: io.Discard})
+	if err == nil || err.Error() != "save cancelled" {
+		t.Fatalf("cancelled save: %v", err)
+	}
+	if _, statErr := os.Stat(out); !os.IsNotExist(statErr) {
+		t.Errorf("partial output left behind: %v", statErr)
+	}
+}
+
+// TestRunSaveDuplicateReference: the same image named twice is saved once.
+func TestRunSaveDuplicateReference(t *testing.T) {
+	f := newFixture(t)
+	_, a := save(t, saveConfig{Store: f.store, Refs: []string{"demo/app:v1", "demo/app", "demo/app:v1"}})
+	var refs []string
+	for _, d := range a.Index.Manifests {
+		refs = append(refs, d.Annotations[dockerarchive.AnnotationRefName])
+	}
+	if !reflect.DeepEqual(refs, []string{"v1", "latest"}) {
+		t.Errorf("index.json entries %v, want [v1 latest]", refs)
+	}
+}
+
+// TestHostPlatform: containers run on linux unless the host is windows,
+// so a darwin client still prefers the linux child of its architecture.
+func TestHostPlatform(t *testing.T) {
+	p := hostPlatform()
+	wantOS := "linux"
+	if runtime.GOOS == "windows" {
+		wantOS = "windows"
+	}
+	if p.OS != wantOS || p.Architecture != runtime.GOARCH || p.Variant != "" {
+		t.Errorf("hostPlatform() = %+v", p)
 	}
 }

@@ -190,4 +190,10 @@ Deferred from `docs/superpowers/specs/2026-09-05-browse-command-design.md`:
   numbers in meta.json (bytes added to the CAS, dedup ratio).
 - `ls` and `save` against a running `serve` over HTTP, as noted for
   `browse`.
+- Two indexes that share a platform child (say `multi:v1` and `multi:v2`
+  after a platform was added) save as docker would, one `manifest.json`
+  entry carrying both RepoTags, but `import` rejects that shape as
+  ambiguous (`dockerarchive.assignNames`); the import follow-up above,
+  naming from the `index.json` annotations `save` writes, would fix the
+  round trip.
 

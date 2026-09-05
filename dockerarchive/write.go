@@ -47,8 +47,9 @@ type Source interface {
 // WriteOptions configure Write. Platform, when set, chooses which child of
 // an index the index's manifest.json entry describes; without it, or when
 // no child matches, the entry describes the first child that is an image
-// manifest and not an attestation, and an index with no such child gets no
-// entry.
+// manifest with a config and not an attestation, and an index with no such
+// child gets no entry. A manifest without a config (an artifact) gets no
+// entry either.
 type WriteOptions struct {
 	Platform *oci.Platform
 }
@@ -74,11 +75,12 @@ func Write(ctx context.Context, w io.Writer, src Source, images []Export, opts W
 	return p.writeTo(ctx, w)
 }
 
-// saveItem is one blobs/sha256 entry: a manifest read whole, or a blob
-// streamed from the source.
+// saveItem is one blobs/sha256 entry: a manifest read whole and parsed,
+// or a blob streamed from the source.
 type saveItem struct {
-	size int64
-	body []byte // manifests and indexes; nil for a streamed blob
+	size     int64
+	body     []byte        // manifests and indexes; nil for a streamed blob
+	manifest *oci.Manifest // parsed body, for manifests and indexes
 }
 
 // savePlan is what Write has resolved before it starts writing.
@@ -116,13 +118,13 @@ func (p *savePlan) add(ctx context.Context, img Export, platform *oci.Platform) 
 			if err != nil {
 				return err
 			}
-			if !cm.IsIndex() {
+			if !cm.IsIndex() && cm.Config != nil {
 				legacyDigest, legacyManifest = c.Digest, cm
 				break
 			}
 		}
 	}
-	if legacyManifest == nil {
+	if legacyManifest == nil || legacyManifest.Config == nil {
 		return nil
 	}
 	le := p.legacy[legacyDigest]
@@ -161,9 +163,8 @@ func legacyCandidates(m *oci.Manifest, platform *oci.Platform) []oci.Descriptor 
 // everything it references, and returns it. A manifest already resolved
 // is returned from the plan.
 func (p *savePlan) resolve(ctx context.Context, repo string, d oci.Digest) (*oci.Manifest, []byte, error) {
-	if it := p.items[d]; it != nil && it.body != nil {
-		m, err := oci.ParseManifest(it.body)
-		return m, it.body, err
+	if it := p.items[d]; it != nil && it.manifest != nil {
+		return it.manifest, it.body, nil
 	}
 	body, err := p.src.Manifest(ctx, repo, d)
 	if err != nil {
@@ -173,7 +174,7 @@ func (p *savePlan) resolve(ctx context.Context, repo string, d oci.Digest) (*oci
 	if err != nil {
 		return nil, nil, fmt.Errorf("dockerarchive: manifest %s of %s: %w", d, repo, err)
 	}
-	p.items[d] = &saveItem{size: int64(len(body)), body: body}
+	p.items[d] = &saveItem{size: int64(len(body)), body: body, manifest: m}
 	for _, bd := range m.BlobDescriptors() {
 		if _, ok := p.items[bd.Digest]; !ok {
 			p.items[bd.Digest] = &saveItem{size: bd.Size}
