@@ -24,6 +24,28 @@ Decisions taken during the design review (2026-09-05):
   stack, one list implementation for every level, I/O in Bubble Tea
   commands. Opening the store for browsing has **no side effects**.
 
+Decisions taken during implementation (2026-09-05):
+
+- Backspace at the root of the filesystem stack returns to the storage
+  stack where it was, instead of leaving the image; leaving happens from
+  the storage root. Popping frames after a failed load follows the same
+  rule.
+- The repository listing's detail is `N tags · M manifests` rather than
+  an untagged count: telling untagged manifests apart needs every tag's
+  meta.json, which the repository's own listing reads anyway.
+- In a listing `h` is back and `l` is open (vi keys); in the viewer `h`
+  toggles hex and `←`/`→` scroll text horizontally, so back there is
+  Backspace or Esc.
+- A prism's `blobs/` rows read "N files" from meta.json's `entries`, the
+  count of regular files.
+- The bottom-line input (filter, search, goto) is a small type of the
+  package's own, not `bubbles/textinput`, which would have pulled
+  `github.com/atotto/clipboard` into the module for a paste feature the
+  browser does not need.
+- The "store in use" path is covered by `store.ErrInUse`'s test; at the
+  command level the terminal check runs before the store is opened, so a
+  test without a terminal cannot reach it.
+
 ## Goals
 
 - Find an image by repository and tag (or digest) and see what the store

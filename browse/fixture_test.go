@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"math/rand/v2"
+	"os"
 	"path/filepath"
 	"slices"
 	"testing"
@@ -107,9 +108,22 @@ func fixGzip(t *testing.T, data []byte) []byte {
 	return buf.Bytes()
 }
 
-func newFixture(t *testing.T) *fixture {
+func newFixture(t *testing.T) *fixture { return newFixtureIn(t, t.TempDir()) }
+
+// TestWriteFixture builds the fixture store under $OCI_AMBER_BROWSE_FIXTURE
+// so the real binary can be pointed at it; it is skipped otherwise.
+func TestWriteFixture(t *testing.T) {
+	dir := os.Getenv("OCI_AMBER_BROWSE_FIXTURE")
+	if dir == "" {
+		t.Skip("set OCI_AMBER_BROWSE_FIXTURE to a directory to write the fixture store there")
+	}
+	newFixtureIn(t, dir)
+}
+
+// newFixtureIn builds the fixture in <dir>/store with <dir>/work as the
+// ingest work directory.
+func newFixtureIn(t *testing.T, dir string) *fixture {
 	t.Helper()
-	dir := t.TempDir()
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	st, err := store.Open(filepath.Join(dir, "store"), store.Options{Logger: log})
 	if err != nil {
