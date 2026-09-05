@@ -83,7 +83,7 @@ func parseSaveRef(s string) (saveRef, error) {
 	r := saveRef{repo: repo}
 	switch {
 	case reference == "" && len(s) > len(repo):
-		return saveRef{}, fmt.Errorf("%q: empty tag", s)
+		return saveRef{}, fmt.Errorf("%q: nothing after the %q", s, s[len(repo):])
 	case reference == "":
 	case oci.IsDigest(reference):
 		d, err := oci.ParseDigest(reference)
@@ -166,15 +166,20 @@ func runSave(ctx context.Context, cfg saveConfig) error {
 // not exist is an error.
 func resolveExports(images *image.Store, refs []string) ([]dockerarchive.Export, error) {
 	var exports []dockerarchive.Export
-	add := func(repo, reference, tag string) error {
-		im, err := images.Open(repo, reference)
+	// add opens one tag or digest reference; r names it in errors.
+	add := func(r saveRef) error {
+		reference := r.tag
+		if r.digest != "" {
+			reference = r.digest.String()
+		}
+		im, err := images.Open(r.repo, reference)
 		if errors.Is(err, image.ErrNotFound) {
-			return fmt.Errorf("%s: not found", saveRef{repo: repo, tag: tag, digest: oci.Digest(reference)}.String())
+			return fmt.Errorf("%s: not found", r)
 		}
 		if err != nil {
 			return err
 		}
-		exports = append(exports, dockerarchive.Export{Repo: repo, Digest: im.Meta.Digest, MediaType: im.Meta.MediaType, Tag: tag})
+		exports = append(exports, dockerarchive.Export{Repo: r.repo, Digest: im.Meta.Digest, MediaType: im.Meta.MediaType, Tag: r.tag})
 		return nil
 	}
 	for _, s := range refs {
@@ -182,27 +187,22 @@ func resolveExports(images *image.Store, refs []string) ([]dockerarchive.Export,
 		if err != nil {
 			return nil, err
 		}
-		switch {
-		case r.digest != "":
-			if err := add(r.repo, r.digest.String(), ""); err != nil {
+		if r.tag != "" || r.digest != "" {
+			if err := add(r); err != nil {
 				return nil, err
 			}
-		case r.tag != "":
-			if err := add(r.repo, r.tag, r.tag); err != nil {
+			continue
+		}
+		tags, err := images.Tags(r.repo)
+		if errors.Is(err, image.ErrNotFound) || (err == nil && len(tags) == 0) {
+			return nil, fmt.Errorf("%s: not found", r)
+		}
+		if err != nil {
+			return nil, err
+		}
+		for _, tag := range tags {
+			if err := add(saveRef{repo: r.repo, tag: tag}); err != nil {
 				return nil, err
-			}
-		default:
-			tags, err := images.Tags(r.repo)
-			if errors.Is(err, image.ErrNotFound) || (err == nil && len(tags) == 0) {
-				return nil, fmt.Errorf("%s: not found", r.repo)
-			}
-			if err != nil {
-				return nil, err
-			}
-			for _, tag := range tags {
-				if err := add(r.repo, tag, tag); err != nil {
-					return nil, err
-				}
 			}
 		}
 	}

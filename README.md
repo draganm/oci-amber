@@ -4,8 +4,9 @@ oci-amber is an OCI distribution registry whose storage is an embedded
 [amber-store-core](https://github.com/jobs-build/amber-store-core) store. It
 speaks the standard `/v2/` API, so docker, containerd/nerdctl, podman/skopeo,
 crane, oras and buildkit push and pull against it without any client-side
-configuration beyond the registry URL, imports `docker image save`
-archives directly, and has a terminal browser over the store.
+configuration beyond the registry URL, imports and writes `docker image
+save` archives directly, lists what it holds, and has a terminal browser
+over the store.
 
 Instead of keeping each layer as an opaque compressed blob, oci-amber takes
 layers apart on push: [zrecipe](https://github.com/draganm/zrecipe)
@@ -178,6 +179,63 @@ between text and hex; files over 8 MiB are hex only.
 | `p` | JSON pretty ↔ stored bytes |
 | `:` | go to an offset in hex |
 | `q` `ctrl-c` | quit |
+
+## Listing images
+
+`oci-amber ls` prints the images in a store, one row per tag, sorted by
+repository and tag.
+
+```sh
+./oci-amber ls --store /var/lib/oci-amber
+./oci-amber ls --store /var/lib/oci-amber library/app
+```
+
+```
+REPOSITORY    TAG    DIGEST         KIND                                  SIZE        ROOTFS   PUSHED
+busybox       1.37   3f0a9c2e1b4d   manifest                              4.2 MiB     ok       2026-09-05 10:22
+library/app   v1     a1b2c3d4e5f6   index (2 platforms + 1 attestation)   402.1 MiB   -        2026-09-04 18:03
+```
+
+DIGEST is the start of the manifest digest, SIZE the image as its manifest
+describes it (config, layers and manifest bytes; for an index, every
+child), ROOTFS whether the root filesystem view is there (`ok`, `partial`,
+`unavailable`, `not-applicable`; `-` for an index) and PUSHED when the
+image was stored, in local time. `-a` adds the manifests no tag points at
+as `<none>`, except the children of an index, which its row accounts
+for. An optional repository name restricts the listing to it. Like
+`browse`, `ls` opens the store directly, so it cannot run while `serve`
+has it open, and never writes.
+
+## Saving an image
+
+`oci-amber save` writes images to a `docker image save` archive, the
+counterpart of `import`: an OCI layout inside a tar (`oci-layout`,
+`index.json`, `blobs/sha256/*`) with Docker's `manifest.json` next to it,
+the archive `docker save` writes since Docker 25 and `docker load` and
+`crane push` read.
+
+```sh
+./oci-amber save --store /var/lib/oci-amber -o app.tar library/app:v1
+./oci-amber save --store /var/lib/oci-amber busybox | docker load
+./oci-amber save --store /var/lib/oci-amber -o all.tar library/app:v1 library/app@sha256:3f0a… busybox
+```
+
+A reference is `repo:tag`, `repo@sha256:…`, or a bare `repo`, which saves
+every tag of the repository; several references go into one archive. The
+archive goes to stdout unless `-o path` is given; a terminal is refused.
+Layers stored as prisms are recomposed on the way out and their sha256
+verified, and manifests are the stored bytes, so what `docker image
+inspect` shows after a load is what the store holds. An index is saved
+whole, every platform and attestation included; its `manifest.json`
+entry, the one Docker's graph-driver loader reads, describes the child
+for the host's platform, or the first platform child when none matches.
+`index.json` names the image the way docker does (`io.containerd.image.name`
+is `docker.io/library/busybox:1.37` for `busybox:1.37`); an image saved by
+digest has no name, and `import` needs `--name` for it. The archive is a
+function of its content: saving the same image twice gives the same
+bytes. Nothing is written before every reference has been resolved, and
+`-o` removes a partial file after a failure. `save` opens the store
+directly, so it cannot run while `serve` has it open.
 
 ## Configuration
 

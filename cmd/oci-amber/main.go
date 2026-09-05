@@ -1,7 +1,8 @@
 // Command oci-amber runs an OCI distribution registry whose storage is an
 // embedded amber store. The `serve` subcommand runs the registry, `import`
-// stores a `docker image save` archive without running it, and `browse`
-// walks a store in the terminal.
+// stores a `docker image save` archive without running it, `save` writes
+// one, `ls` lists a store's images and `browse` walks a store in the
+// terminal.
 package main
 
 import (

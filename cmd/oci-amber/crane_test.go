@@ -427,3 +427,57 @@ func craneInspect(t *testing.T, storeDir string, digests ...oci.Digest) map[oci.
 	}
 	return out
 }
+
+// TestCraneReadsSavedArchive pushes an image with crane, writes it out
+// with the save command and pushes the archive back with crane, which
+// reads it as a docker save tarball: manifest.json, the config and the
+// layers. It is skipped when crane is not on PATH.
+func TestCraneReadsSavedArchive(t *testing.T) {
+	if _, err := exec.LookPath("crane"); err != nil {
+		t.Skip("crane is not on PATH; run under `nix develop` to exercise the real-client smoke test")
+	}
+	tmp := t.TempDir()
+	storeDir := filepath.Join(tmp, "store")
+	logs := &syncBuffer{}
+	t.Cleanup(func() {
+		if t.Failed() {
+			t.Logf("server log:\n%s", logs.String())
+		}
+	})
+	dockerCfg := filepath.Join(tmp, "docker")
+	if err := os.MkdirAll(dockerCfg, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	env := append(os.Environ(), "DOCKER_CONFIG="+dockerCfg)
+
+	addr, stop := craneServer(t, storeDir, logs)
+	img := craneBuildLayout(t, filepath.Join(tmp, "layout"))
+	craneRun(t, env, "push", "--insecure", img.dir, addr+"/crane/app:v1")
+	stop()
+
+	// The store is free: save the image the way docker would.
+	saved := filepath.Join(tmp, "saved.tar")
+	var stderr bytes.Buffer
+	if err := runSave(context.Background(), saveConfig{Store: storeDir, Refs: []string{"crane/app:v1"}, Output: saved, Stdout: io.Discard, Stderr: &stderr}); err != nil {
+		t.Fatalf("save: %v\n%s", err, stderr.String())
+	}
+
+	// crane push of a tarball rebuilds the manifest from manifest.json's
+	// config and layers, so the layer and config digests survive and
+	// validate reads every layer back.
+	addr2, stop2 := craneServer(t, storeDir, logs)
+	defer stop2()
+	repo := addr2 + "/crane/loaded"
+	craneRun(t, env, "push", "--insecure", saved, repo+":v1")
+	craneRun(t, env, "validate", "--insecure", "--remote", repo+":v1")
+	m, err := oci.ParseManifest(bytes.TrimRight([]byte(craneRun(t, env, "manifest", "--insecure", repo+":v1")), "\n"))
+	if err != nil {
+		t.Fatalf("manifest of the re-pushed image: %v", err)
+	}
+	if m.Config == nil || m.Config.Digest != oci.DigestOfBytes(img.config) {
+		t.Errorf("config = %+v, want %s", m.Config, oci.DigestOfBytes(img.config))
+	}
+	if len(m.Layers) != 1 || m.Layers[0].Digest != oci.DigestOfBytes(img.layer) {
+		t.Errorf("layers = %+v, want [%s]", m.Layers, oci.DigestOfBytes(img.layer))
+	}
+}

@@ -60,7 +60,7 @@ func TestSaveFlags(t *testing.T) {
 	if _, err := runSaveApp(t, "--store", "/srv/amber"); err == nil || !strings.Contains(err.Error(), "at least one") {
 		t.Errorf("no reference: %v", err)
 	}
-	for _, bad := range []string{"Not/Valid:v1", "app:", "app:bad tag", "app@sha256:short", "app@md5:abc"} {
+	for _, bad := range []string{"Not/Valid:v1", "app:", "app@", "app:bad tag", "app@sha256:short", "app@md5:abc"} {
 		if _, err := runSaveApp(t, "--store", "/srv/amber", bad); err == nil {
 			t.Errorf("%q must be rejected", bad)
 		}
@@ -273,11 +273,20 @@ func TestRunSaveToFile(t *testing.T) {
 func TestRunSaveUnknownReference(t *testing.T) {
 	f := newFixture(t)
 	out := filepath.Join(t.TempDir(), "nope.tar")
-	for _, refs := range [][]string{{"demo/app:nope"}, {"nobody"}, {"demo/app:v1", "nobody:x"}, {"demo/app@sha256:0000000000000000000000000000000000000000000000000000000000000000"}} {
+	for _, tc := range []struct {
+		refs []string
+		want string
+	}{
+		{[]string{"demo/app:nope"}, "demo/app:nope: not found"},
+		{[]string{"nobody"}, "nobody: not found"},
+		{[]string{"demo/app:v1", "nobody:x"}, "nobody:x: not found"},
+		{[]string{"demo/app@sha256:0000000000000000000000000000000000000000000000000000000000000000"}, "demo/app@sha256:0000000000000000000000000000000000000000000000000000000000000000: not found"},
+	} {
+		refs := tc.refs
 		var stdout bytes.Buffer
 		err := runSave(context.Background(), saveConfig{Store: f.store, Refs: refs, Output: out, Stdout: &stdout, Stderr: io.Discard})
-		if err == nil || !strings.Contains(err.Error(), "not found") {
-			t.Errorf("%v: err = %v, want not found", refs, err)
+		if err == nil || err.Error() != tc.want {
+			t.Errorf("%v: err = %v, want %q", refs, err, tc.want)
 		}
 		if _, statErr := os.Stat(out); !os.IsNotExist(statErr) {
 			t.Errorf("%v: the output file was created", refs)
