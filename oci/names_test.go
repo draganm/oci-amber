@@ -119,3 +119,20 @@ func TestValidateTag(t *testing.T) {
 		})
 	}
 }
+
+func TestSplitReference(t *testing.T) {
+	for _, tc := range []struct{ in, repo, ref string }{
+		{"busybox", "busybox", ""},
+		{"library/app:v1", "library/app", "v1"},
+		{"localhost:5000/app", "localhost:5000/app", ""},
+		{"localhost:5000/app:v1", "localhost:5000/app", "v1"},
+		{"app@sha256:abc", "app", "sha256:abc"},
+		{"a/b:c@sha256:abc", "a/b:c", "sha256:abc"},
+		{"a/b:c/d", "a/b:c/d", ""},
+	} {
+		repo, ref := SplitReference(tc.in)
+		if repo != tc.repo || ref != tc.ref {
+			t.Errorf("SplitReference(%q) = %q, %q; want %q, %q", tc.in, repo, ref, tc.repo, tc.ref)
+		}
+	}
+}

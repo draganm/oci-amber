@@ -9,15 +9,6 @@ import (
 	"github.com/draganm/oci-amber/oci"
 )
 
-// attestationTypeAnnotation and attestationType together mark a BuildKit
-// attestation manifest in an index: attestationTypeAnnotation is the
-// annotation key on the descriptor that references it, attestationType the
-// value that identifies an attestation manifest.
-const (
-	attestationTypeAnnotation = "vnd.docker.reference.type"
-	attestationType           = "attestation-manifest"
-)
-
 // PlanBlob is one config, layer or other blob to store.
 type PlanBlob struct {
 	Digest    oci.Digest
@@ -120,7 +111,7 @@ func (a *Archive) Plan(opts PlanOptions) (*Plan, error) {
 					Body:        n.body,
 					IsIndex:     n.manifest.IsIndex(),
 					Synthesized: n.synthesized,
-					Attestation: n.desc.Annotations[attestationTypeAnnotation] == attestationType,
+					Attestation: n.desc.IsAttestation(),
 				})
 			}
 			e.Manifests = append(e.Manifests, n.desc.Digest)
@@ -128,7 +119,7 @@ func (a *Archive) Plan(opts PlanOptions) (*Plan, error) {
 		walk(r)
 		if e.IsIndex {
 			for _, c := range r.children {
-				if c.desc.Annotations[attestationTypeAnnotation] == attestationType {
+				if c.desc.IsAttestation() {
 					e.Attestations++
 				} else {
 					e.Platforms++
