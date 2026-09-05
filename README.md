@@ -119,7 +119,7 @@ variable in the last column; a flag on the command line wins.
 | Flag | Default | Meaning | Environment |
 |---|---|---|---|
 | `--store` | required | store directory (created on first start) | `OCI_AMBER_STORE` |
-| `--work-dir` | `<store>/work` | parent of `<work-dir>/oci-amber/`, where spilled uploads and the zrecipe spool live; at startup the *contents* of `<work-dir>/oci-amber/uploads` and `<work-dir>/oci-amber/spool` are deleted and nothing else under `--work-dir` is touched | `OCI_AMBER_WORK_DIR` |
+| `--work-dir` | `<store>/work` | parent of `<work-dir>/oci-amber/`, where spilled uploads and the zrecipe spool live; at startup the *contents* of `<work-dir>/oci-amber/uploads` and `<work-dir>/oci-amber/spool` are deleted (`import` also removes stale `<work-dir>/oci-amber/import-*.tar` stdin copies) and nothing else under `--work-dir` is touched | `OCI_AMBER_WORK_DIR` |
 | `--listen` | `:5000` | listen address | `OCI_AMBER_LISTEN` |
 | `--max-in-memory` | `64MiB` | upload spool and zrecipe spool threshold before spilling to `--work-dir`; units `B`, `KiB`, `MiB`, `GiB`, `KB`, `MB`, `GB` | `OCI_AMBER_MAX_IN_MEMORY` |
 | `--analyze-parallelism` | `2` | zrecipe candidate workers per blob (each holds one engine working set) | `OCI_AMBER_ANALYZE_PARALLELISM` |
