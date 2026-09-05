@@ -281,8 +281,9 @@ func TestRoundTripCheckUsesStoredCompParams(t *testing.T) {
 
 func TestPutContextCancelledDuringPrismFails(t *testing.T) {
 	// The round-trip hook stands in for the request going away in the
-	// middle of staging: the upload must fail with the context's error,
-	// nothing may be published and the spool must stay usable for a retry.
+	// round-trip check after the commit: the upload must fail with the
+	// context's error, nothing may be published and the spool must stay
+	// usable for a retry.
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	orig := roundTripCheck
