@@ -81,11 +81,15 @@ type config struct {
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	serve := func(ctx context.Context, cfg config) error {
-		cfg.Stop = stop
-		return run(ctx, cfg)
+	cmds := commands{
+		Serve: func(ctx context.Context, cfg config) error {
+			cfg.Stop = stop
+			return run(ctx, cfg)
+		},
+		Import: runImport,
+		Browse: runBrowse,
 	}
-	if err := newApp(serve, runImport, runBrowse).RunContext(ctx, os.Args); err != nil {
+	if err := newApp(cmds).RunContext(ctx, os.Args); err != nil {
 		fmt.Fprintln(os.Stderr, "oci-amber:", err)
 		os.Exit(1)
 	}
@@ -101,11 +105,27 @@ func envVar(flag string) []string {
 	return []string{envPrefix + strings.ToUpper(strings.ReplaceAll(flag, "-", "_"))}
 }
 
-// newApp builds the command line application. serve, imp and brw are what
-// the `serve`, `import` and `browse` subcommands run once their flags have
-// been validated; main passes run, runImport and runBrowse, tests pass
-// functions that capture the config.
-func newApp(serve func(ctx context.Context, cfg config) error, imp func(ctx context.Context, cfg importConfig) error, brw func(ctx context.Context, cfg browseConfig) error) *cli.App {
+// commands is what each subcommand runs once its flags have been
+// validated. main wires the real functions; tests wire ones that capture
+// the config. A nil entry is a no-op.
+type commands struct {
+	Serve  func(ctx context.Context, cfg config) error
+	Import func(ctx context.Context, cfg importConfig) error
+	Browse func(ctx context.Context, cfg browseConfig) error
+}
+
+// newApp builds the command line application over cmds.
+func newApp(cmds commands) *cli.App {
+	serve, imp, brw := cmds.Serve, cmds.Import, cmds.Browse
+	if serve == nil {
+		serve = func(context.Context, config) error { return nil }
+	}
+	if imp == nil {
+		imp = func(context.Context, importConfig) error { return nil }
+	}
+	if brw == nil {
+		brw = func(context.Context, browseConfig) error { return nil }
+	}
 	return &cli.App{
 		Name:            "oci-amber",
 		Usage:           "OCI distribution registry backed by an embedded amber store",

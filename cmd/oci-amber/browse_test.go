@@ -19,14 +19,11 @@ func runBrowseApp(t *testing.T, args ...string) (browseConfig, error) {
 	t.Helper()
 	var got browseConfig
 	called := false
-	app := newApp(
-		func(context.Context, config) error { return nil },
-		func(context.Context, importConfig) error { return nil },
-		func(_ context.Context, cfg browseConfig) error {
-			called = true
-			got = cfg
-			return nil
-		})
+	app := newApp(commands{Browse: func(_ context.Context, cfg browseConfig) error {
+		called = true
+		got = cfg
+		return nil
+	}})
 	app.Writer = io.Discard
 	app.ErrWriter = io.Discard
 	err := app.RunContext(context.Background(), append([]string{"oci-amber", "browse"}, args...))

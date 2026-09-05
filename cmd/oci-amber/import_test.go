@@ -23,11 +23,11 @@ func runImportApp(t *testing.T, args ...string) (importConfig, error) {
 	t.Helper()
 	var got importConfig
 	called := false
-	app := newApp(func(context.Context, config) error { return nil }, func(_ context.Context, cfg importConfig) error {
+	app := newApp(commands{Import: func(_ context.Context, cfg importConfig) error {
 		called = true
 		got = cfg
 		return nil
-	}, func(context.Context, browseConfig) error { return nil })
+	}})
 	app.Writer = io.Discard
 	app.ErrWriter = io.Discard
 	err := app.RunContext(context.Background(), append([]string{"oci-amber", "import"}, args...))

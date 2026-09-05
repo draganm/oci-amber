@@ -6,18 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"log/slog"
 	"os"
-	"path/filepath"
 
 	"github.com/charmbracelet/x/term"
 	"github.com/urfave/cli/v2"
 
-	"github.com/draganm/oci-amber/blob"
 	"github.com/draganm/oci-amber/browse"
-	"github.com/draganm/oci-amber/image"
-	"github.com/draganm/oci-amber/store"
 )
 
 // browseConfig is everything `browse` needs. browseConfigFromCLI fills it
@@ -60,11 +55,8 @@ func runBrowse(ctx context.Context, cfg browseConfig) error {
 	if stderr == nil {
 		stderr = os.Stderr
 	}
-	if _, err := os.Stat(filepath.Join(cfg.Store, store.ConfigFile)); err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return fmt.Errorf("no oci-amber store at %s", cfg.Store)
-		}
-		return fmt.Errorf("checking store %s: %w", cfg.Store, err)
+	if err := checkStoreExists(cfg.Store); err != nil {
+		return err
 	}
 	if f, ok := stdout.(*os.File); !ok || !term.IsTerminal(f.Fd()) {
 		return errors.New("browse needs a terminal")
@@ -90,18 +82,10 @@ func runBrowse(ctx context.Context, cfg browseConfig) error {
 		}
 	}()
 
-	st, err := store.Open(cfg.Store, store.Options{Logger: log})
-	if errors.Is(err, store.ErrInUse) {
-		return fmt.Errorf("store %s is in use by another process", cfg.Store)
-	}
+	ro, err := openReadOnly(cfg.Store, log)
 	if err != nil {
-		return fmt.Errorf("opening store %s: %w", cfg.Store, err)
+		return err
 	}
-	blobs := blob.NewReadOnly(st, log)
-	images := image.New(st, blobs, log)
-	runErr := browse.Run(ctx, browse.Options{Store: st, Blobs: blobs, Images: images, Start: cfg.Start})
-	if err := st.Close(); err != nil {
-		return errors.Join(runErr, fmt.Errorf("closing store: %w", err))
-	}
-	return runErr
+	runErr := browse.Run(ctx, browse.Options{Store: ro.st, Blobs: ro.blobs, Images: ro.images, Start: cfg.Start})
+	return errors.Join(runErr, ro.Close())
 }
