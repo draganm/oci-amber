@@ -25,6 +25,27 @@ Decisions taken during the design review (2026-09-05):
   ingested, bytes added to the CAS, and the dedup ratio, each with a
   human-readable size and the exact count.
 
+Decisions taken during implementation (2026-09-05):
+
+- A raw blob's observer stages are analyze then raw (Put always enters
+  analyze before deciding), not "raw only".
+- A re-import re-publishes manifests, and `image.Store.Put` writes a
+  fresh meta.json and root nodes each time, so "Added to CAS" for an
+  all-present re-import is a few hundred bytes of manifest metadata
+  rather than 0; the report's Dedup ratio line then reads "everything
+  already present, N bytes of manifest metadata rewritten".
+- `oci-layout` is read when present and exposed as `Archive.LayoutVersion`;
+  its absence is not an error (index.json is the gate), a malformed one
+  is.
+- `PlanManifest.Attestation` marks BuildKit attestation manifests (from
+  the `vnd.docker.reference.type` annotation on the referencing
+  descriptor); the report's rootfs summary skips them.
+- Two `index.json` entries resolving to the same image
+  (`docker save img:a img:b`) produce one plan entry carrying both
+  names.
+- The terminal check uses the stdout file mode (character device), so
+  no dependency beyond the three Charm modules was added.
+
 ## Goals
 
 - Import a `docker image save` archive (Docker 25 and later, which write
@@ -393,8 +414,9 @@ Chunks reused   38.2%       of offered bytes were already in the store
   a blob shared by two entries counts once), the manifest objects and the
   rootfs tree.
 - **Dedup ratio**: compressed ÷ added, with `1 − added/compressed` as the
-  percentage. When nothing was added the line reads `everything already
-  present`.
+  percentage. When no blob was processed the line reads `everything
+  already present`, plus `, N bytes of manifest metadata rewritten` when
+  Added > 0.
 - **Chunks reused**: `DedupedBytes ÷ LogicalBytes` over the same image
   stats, the figure the registry logs as `deduped_percent`. It separates
   chunk-level dedup from compression in the ratio above. A blob shared by
@@ -427,8 +449,9 @@ the exact number with thousands separators.
   factored out of `serveFlags`.
 - README: an "Importing a docker save archive" section.
 - New dependencies: `github.com/charmbracelet/bubbletea`,
-  `github.com/charmbracelet/bubbles`, `github.com/charmbracelet/lipgloss`
-  (and `golang.org/x/term`, already transitive, for the terminal check).
+  `github.com/charmbracelet/bubbles`, `github.com/charmbracelet/lipgloss`.
+  The terminal check uses the stdout file mode (`os.ModeCharDevice`), so
+  it adds no dependency of its own.
 
 ## Testing
 
@@ -443,7 +466,7 @@ the exact number with thousands separators.
 - `upload`: a section spool reads only its window; `Remove` leaves the
   file alone; `Open` after `Remove` fails.
 - `blob`: observer sequence for a prism (analyze, decompose, verify, each
-  reaching the size), a raw blob (raw only), a decompose downgrade
+  reaching the size), a raw blob (analyze, then raw), a decompose downgrade
   (analyze, decompose, raw); every existing test passes with a nil
   observer.
 - `importer`: end to end against a real store in a temp dir with gzip tar

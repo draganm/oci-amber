@@ -4,7 +4,8 @@ oci-amber is an OCI distribution registry whose storage is an embedded
 [amber-store-core](https://github.com/jobs-build/amber-store-core) store. It
 speaks the standard `/v2/` API, so docker, containerd/nerdctl, podman/skopeo,
 crane, oras and buildkit push and pull against it without any client-side
-configuration beyond the registry URL.
+configuration beyond the registry URL, and imports `docker image save`
+archives directly.
 
 Instead of keeping each layer as an opaque compressed blob, oci-amber takes
 layers apart on push: [zrecipe](https://github.com/draganm/zrecipe)
@@ -65,6 +66,50 @@ behind a TLS terminator or use it on a trusted network.
 
 `SIGINT`/`SIGTERM` stop the listener, wait up to 30 s for in-flight requests,
 close the upload sessions and the store, and exit 0.
+
+## Importing a docker save archive
+
+`oci-amber import` stores an image saved with `docker image save` straight
+into the store, without running the registry, through the same pipeline a
+push goes through. On a terminal it shows per-layer progress and an ETA;
+when it is done it prints a report of what was ingested.
+
+```sh
+docker image save busybox:1.37 -o busybox.tar
+./oci-amber import --store /var/lib/oci-amber busybox.tar
+docker image save app:v1 | ./oci-amber import --store /var/lib/oci-amber -
+```
+
+The image is published under the archive's `RepoTags` with a leading
+registry host removed (`registry.example.ch/team/app:v1` becomes
+`team/app:v1`); `--name repo:tag` overrides that for a single-image
+archive. Only the platforms whose blobs the archive holds are published:
+the index is pruned to them, as `docker push` does. Archives without an
+OCI layout (`index.json`; Docker before 25, podman's docker-archive) are
+rejected.
+
+`import` shares `--store`, `--work-dir`, `--max-in-memory`,
+`--analyze-parallelism`, `--analyze-timeout`, `--max-concurrent-finalize`,
+`--verify-roundtrip` and `--log-level` with `serve`, and adds
+`--progress auto|tui|plain` (`auto` picks the TUI on a terminal),
+`--log-file path` and `--name`. It cannot run while `serve` has the store
+open. An interrupted import leaves the blobs it stored in place; running
+it again skips them.
+
+The report:
+
+```
+Imported busybox.tar in 42s
+
+  busybox:1.37   sha256:3f0a…9c2e   index, 1 platform + 1 attestation   rootfs ok, 1,204 entries
+
+Blobs           8 processed: 6 stored (5 prism, 1 raw: not-tar), 2 already present
+Compressed      1.8 MiB     1,900,727 bytes   blob and manifest bytes as they are in the archive
+Uncompressed    4.2 MiB     4,388,352 bytes   after decompression; raw blobs counted as is
+Added to CAS    1.1 MiB     1,153,024 bytes   appended to pack segments, manifests and rootfs tree included
+Dedup ratio     1.65x       compressed bytes ÷ bytes added to CAS   (39.3% not written)
+Chunks reused   38.2%       of offered bytes were already in the store
+```
 
 ## Configuration
 
