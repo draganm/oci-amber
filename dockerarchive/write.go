@@ -40,7 +40,7 @@ type Export struct {
 // repository and digest, and the bytes of a config or layer blob, which
 // Blob streams to w.
 type Source interface {
-	Manifest(repo string, d oci.Digest) ([]byte, error)
+	Manifest(ctx context.Context, repo string, d oci.Digest) ([]byte, error)
 	Blob(ctx context.Context, d oci.Digest, w io.Writer) error
 }
 
@@ -67,7 +67,7 @@ func Write(ctx context.Context, w io.Writer, src Source, images []Export, opts W
 	}
 	p := &savePlan{src: src, items: map[oci.Digest]*saveItem{}, legacy: map[oci.Digest]*LegacyEntry{}}
 	for _, img := range images {
-		if err := p.add(img, opts.Platform); err != nil {
+		if err := p.add(ctx, img, opts.Platform); err != nil {
 			return err
 		}
 	}
@@ -92,8 +92,8 @@ type savePlan struct {
 
 // add resolves one export: the top-level entry, everything under it, and
 // its manifest.json entry.
-func (p *savePlan) add(img Export, platform *oci.Platform) error {
-	m, body, err := p.resolve(img.Repo, img.Digest)
+func (p *savePlan) add(ctx context.Context, img Export, platform *oci.Platform) error {
+	m, body, err := p.resolve(ctx, img.Repo, img.Digest)
 	if err != nil {
 		return err
 	}
@@ -112,7 +112,7 @@ func (p *savePlan) add(img Export, platform *oci.Platform) error {
 	if m.IsIndex() {
 		legacyDigest, legacyManifest = "", nil
 		for _, c := range legacyCandidates(m, platform) {
-			cm, _, err := p.resolve(img.Repo, c.Digest)
+			cm, _, err := p.resolve(ctx, img.Repo, c.Digest)
 			if err != nil {
 				return err
 			}
@@ -160,12 +160,12 @@ func legacyCandidates(m *oci.Manifest, platform *oci.Platform) []oci.Descriptor 
 // resolve reads and parses the manifest or index d in repo, records it and
 // everything it references, and returns it. A manifest already resolved
 // is returned from the plan.
-func (p *savePlan) resolve(repo string, d oci.Digest) (*oci.Manifest, []byte, error) {
+func (p *savePlan) resolve(ctx context.Context, repo string, d oci.Digest) (*oci.Manifest, []byte, error) {
 	if it := p.items[d]; it != nil && it.body != nil {
 		m, err := oci.ParseManifest(it.body)
 		return m, it.body, err
 	}
-	body, err := p.src.Manifest(repo, d)
+	body, err := p.src.Manifest(ctx, repo, d)
 	if err != nil {
 		return nil, nil, fmt.Errorf("dockerarchive: reading manifest %s of %s: %w", d, repo, err)
 	}
@@ -180,7 +180,7 @@ func (p *savePlan) resolve(repo string, d oci.Digest) (*oci.Manifest, []byte, er
 		}
 	}
 	for _, c := range m.Manifests {
-		if _, _, err := p.resolve(repo, c.Digest); err != nil {
+		if _, _, err := p.resolve(ctx, repo, c.Digest); err != nil {
 			return nil, nil, err
 		}
 	}

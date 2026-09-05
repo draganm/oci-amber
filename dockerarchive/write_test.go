@@ -30,7 +30,7 @@ func newMemSource() *memSource {
 	return &memSource{manifests: map[oci.Digest][]byte{}, blobs: map[oci.Digest][]byte{}}
 }
 
-func (m *memSource) Manifest(repo string, d oci.Digest) ([]byte, error) {
+func (m *memSource) Manifest(ctx context.Context, repo string, d oci.Digest) ([]byte, error) {
 	b, ok := m.manifests[d]
 	if !ok {
 		return nil, fmt.Errorf("manifest %s not in %s", d, repo)

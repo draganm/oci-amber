@@ -89,6 +89,7 @@ func main() {
 		Import: runImport,
 		Browse: runBrowse,
 		Ls:     runLs,
+		Save:   runSave,
 	}
 	if err := newApp(cmds).RunContext(ctx, os.Args); err != nil {
 		fmt.Fprintln(os.Stderr, "oci-amber:", err)
@@ -114,6 +115,7 @@ type commands struct {
 	Import func(ctx context.Context, cfg importConfig) error
 	Browse func(ctx context.Context, cfg browseConfig) error
 	Ls     func(ctx context.Context, cfg lsConfig) error
+	Save   func(ctx context.Context, cfg saveConfig) error
 }
 
 // newApp builds the command line application over cmds.
@@ -131,6 +133,10 @@ func newApp(cmds commands) *cli.App {
 	ls := cmds.Ls
 	if ls == nil {
 		ls = func(context.Context, lsConfig) error { return nil }
+	}
+	save := cmds.Save
+	if save == nil {
+		save = func(context.Context, saveConfig) error { return nil }
 	}
 	return &cli.App{
 		Name:            "oci-amber",
@@ -182,6 +188,18 @@ func newApp(cmds commands) *cli.App {
 					return err
 				}
 				return ls(c.Context, cfg)
+			},
+		}, {
+			Name:      "save",
+			Usage:     "write images to a `docker image save` archive",
+			ArgsUsage: "<repo[:tag|@digest]>...",
+			Flags:     saveFlags(),
+			Action: func(c *cli.Context) error {
+				cfg, err := saveConfigFromCLI(c)
+				if err != nil {
+					return err
+				}
+				return save(c.Context, cfg)
 			},
 		}},
 	}
