@@ -97,7 +97,7 @@ func TestObserverRawStages(t *testing.T) {
 	rec.assertStages(t, int64(len(data)), []Stage{StageAnalyze, StageRaw}, StageRaw)
 }
 
-func TestObserverDecomposeDowngrade(t *testing.T) {
+func TestObserverStagingDowngrade(t *testing.T) {
 	rec := &recorder{}
 	b, _, _ := newTestStore(t, Options{VerifyRoundTrip: true, Observer: rec})
 	full := tarBytes(t, "usr/lib/app", textBytes(8<<10, 3))
@@ -106,7 +106,7 @@ func TestObserverDecomposeDowngrade(t *testing.T) {
 	if meta.Kind != KindRaw || meta.RawReason != ReasonDecomposeFailed {
 		t.Fatalf("kind/reason = %s/%s, want raw/decompose-failed", meta.Kind, meta.RawReason)
 	}
-	rec.assertStages(t, int64(len(data)), []Stage{StageAnalyze, StageCommit, StageRaw}, StageAnalyze, StageRaw)
+	rec.assertStages(t, int64(len(data)), []Stage{StageAnalyze, StageRaw}, StageAnalyze, StageRaw)
 }
 
 func TestObserverDedupHitReportsNothing(t *testing.T) {

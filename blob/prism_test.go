@@ -565,10 +565,10 @@ func TestPrismWriteToCancelledContext(t *testing.T) {
 	}
 }
 
-// TestRecipeWriterCloseIsIdempotent covers I6: ingestPrism now defers
-// sink.closeRecipe() right after newAmberSink so that finish() (the success
-// path) can still close the same recipeWriter again without it being an
-// error or a second wait on an already-closed pipe.
+// TestRecipeWriterCloseIsIdempotent covers I6: stage calls
+// sink.closeRecipe() right after DecomposeTo returns so that finish() (the
+// success path) can still close the same recipeWriter again without it
+// being an error or a second wait on an already-closed pipe.
 func TestRecipeWriterCloseIsIdempotent(t *testing.T) {
 	pr, pw := io.Pipe()
 	rw := &recipeWriter{pw: pw, done: make(chan struct{})}
@@ -604,7 +604,7 @@ func TestAmberSinkCloseRecipeUnblocksPutStreamGoroutine(t *testing.T) {
 
 	closed := make(chan struct{})
 	go func() {
-		sink.closeRecipe() // stands in for ingestPrism's deferred call
+		sink.closeRecipe() // stands in for stage's call
 		close(closed)
 	}()
 	select {

@@ -9,14 +9,17 @@ import (
 	"io"
 	"io/fs"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	tarprism "github.com/draganm/tar-prism"
 	zrecipe "github.com/draganm/zrecipe"
+	"github.com/jobs-build/amber-store-core/fstree"
 
 	"github.com/draganm/oci-amber/oci"
 	"github.com/draganm/oci-amber/store"
@@ -407,4 +410,106 @@ func TestPutTruncatedTarStoresRawDecomposeFailed(t *testing.T) {
 	if out := logs.String(); !strings.Contains(out, "level=ERROR") || !strings.Contains(out, "decompose failed") || !strings.Contains(out, "raw_reason=decompose-failed") {
 		t.Errorf("log output lacks the error-level decompose line or the raw reason:\n%s", out)
 	}
+}
+
+// TestPutNonReproducibleLeavesNoStagedObjects: a gzip zrecipe cannot
+// reproduce is staged speculatively while the search runs, then dropped.
+// The raw blob's objects are the only ones that land, the file content
+// the tar carried never reaches the store, and no pack file survives.
+func TestPutNonReproducibleLeavesNoStagedObjects(t *testing.T) {
+	b, st, _ := newTestStore(t, Options{VerifyRoundTrip: true})
+	content := textBytes(4096, 21)
+	tarData := tarBytes(t, "etc/motd", content)
+	data := twoLevelGzip(t, tarData[:len(tarData)/2], tarData[len(tarData)/2:])
+
+	meta := putPrism(t, b, data)
+	if meta.Kind != KindRaw || meta.RawReason != ReasonNotReproducible {
+		t.Fatalf("kind/reason = %s/%s, want raw/not-reproducible", meta.Kind, meta.RawReason)
+	}
+	// The 4 KiB file is one chunk, so its content key is EncodeBlob's.
+	obj, err := fstree.EncodeBlob(content)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if has, _ := st.Has(obj.Key); has {
+		t.Fatal("the staged file content reached the store although the blob is raw")
+	}
+	assertSpoolDirEmpty(t, b)
+	got, _ := pullPrism(t, b, meta.Digest)
+	if !bytes.Equal(got, data) {
+		t.Fatal("pulled bytes differ")
+	}
+}
+
+// cancelOnProgress is an Observer that cancels a context on the first
+// progress report of the analyze stage, standing in for a client that
+// goes away while pass one reads the spool.
+type cancelOnProgress struct {
+	cancel context.CancelFunc
+	once   sync.Once
+}
+
+func (c *cancelOnProgress) BlobStage(oci.Digest, Stage) {}
+func (c *cancelOnProgress) BlobProgress(oci.Digest, int64) {
+	c.once.Do(c.cancel)
+}
+
+func TestPutCancelledDuringAnalyzeLeavesNothing(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	work := filepath.Join(t.TempDir(), "work")
+	b, _, _ := newTestStore(t, Options{WorkDir: work, VerifyRoundTrip: true, Observer: &cancelOnProgress{cancel: cancel}})
+	data := gzipBytes(t, prismTar(t, prismSmallFiles(t)), gzip.DefaultCompression)
+	sp := spoolOf(data)
+
+	_, err := b.Put(ctx, sp)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Put = %v, want context.Canceled", err)
+	}
+	if ok, _ := b.Exists(oci.DigestOfBytes(data)); ok {
+		t.Fatal("blob published despite the cancelled context")
+	}
+	if _, err := sp.Open(); err != nil {
+		t.Fatalf("spool removed after a failed Put: %v", err)
+	}
+	if n := countFiles(t, work); n != 0 {
+		t.Fatalf("%d files left under the work directory", n)
+	}
+}
+
+func TestPutUnwritableSpoolDirFailsUpload(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory permissions")
+	}
+	b, _, _ := newTestStore(t, Options{VerifyRoundTrip: true})
+	dir := spoolDirOf(b)
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(dir, 0o700) })
+	data := gzipBytes(t, prismTar(t, prismSmallFiles(t)), gzip.DefaultCompression)
+	sp := spoolOf(data)
+
+	_, err := b.Put(context.Background(), sp)
+	if err == nil {
+		t.Fatal("Put succeeded although the pack file could not be created")
+	}
+	if ok, _ := b.Exists(oci.DigestOfBytes(data)); ok {
+		t.Fatal("blob published although the upload failed")
+	}
+	if _, err := sp.Open(); err != nil {
+		t.Fatalf("spool removed after a failed Put: %v", err)
+	}
+}
+
+func TestPutUncompressedNonTarNeverStages(t *testing.T) {
+	rec := &recorder{}
+	b, _, _ := newTestStore(t, Options{VerifyRoundTrip: true, Observer: rec})
+	data := []byte(`{"architecture":"arm64","os":"linux"}`) // a config blob
+	meta := putPrism(t, b, data)
+	if meta.Kind != KindRaw || meta.RawReason != ReasonNotTar || meta.Format != "none" {
+		t.Fatalf("meta = %+v, want raw/not-tar/none", *meta)
+	}
+	rec.assertStages(t, int64(len(data)), []Stage{StageAnalyze, StageRaw}, StageRaw)
+	assertSpoolDirEmpty(t, b)
 }

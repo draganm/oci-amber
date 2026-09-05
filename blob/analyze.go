@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -11,9 +13,14 @@ import (
 	"strconv"
 	"strings"
 
+	tarprism "github.com/draganm/tar-prism"
 	zrecipe "github.com/draganm/zrecipe"
 	cpformat "github.com/draganm/zrecipe/format"
+	"github.com/jobs-build/amber-store-core/key"
+	"lukechampine.com/blake3"
 
+	"github.com/draganm/oci-amber/oci"
+	"github.com/draganm/oci-amber/store"
 	"github.com/draganm/oci-amber/upload"
 )
 
@@ -23,7 +30,50 @@ type decision struct {
 	reason RawReason       // set for KindRaw
 	params *zrecipe.Params // set for KindPrism
 	format string          // "gzip" | "zstd" | "none", always set
+	staged *staged         // set for KindPrism: what the speculative decompose left
 }
+
+// staged is what the speculative decompose left behind (spec "Blob
+// orchestration"): the pack holding the recipe, index and file contents
+// as records, the keys that name them inside the pack, and the facts
+// about the decompressed stream. err is the staging failure, classified
+// as pass two's used to be: *readError for the stream (only possible
+// when Analyze itself failed), *sinkError for the pack writer,
+// *decomposeError for tar-prism rejecting the archive.
+type staged struct {
+	pack                 *store.Pack
+	recipe, index, blobs key.Key
+	entries              int
+	diffID               oci.Digest
+	blake3               string
+	size                 int64
+	err                  error
+}
+
+// drop releases the pack, if any. Safe on nil and more than once.
+func (s *staged) drop() {
+	if s != nil && s.pack != nil {
+		s.pack.Close()
+		s.pack = nil
+	}
+}
+
+// check reports why the staged result cannot be committed: the staging
+// error, or a decompressed stream that differs from what Analyze hashed,
+// which can only mean a bug and is treated like a decompose failure.
+func (s *staged) check(params *zrecipe.Params) error {
+	if s.err != nil {
+		return s.err
+	}
+	if s.blake3 != params.Uncompressed.Blake3 || s.size != params.Uncompressed.Size {
+		return &decomposeError{fmt.Errorf("staged stream is %s/%d, analyze recorded %s/%d", s.blake3, s.size, params.Uncompressed.Blake3, params.Uncompressed.Size)}
+	}
+	return nil
+}
+
+// stagePipeSlots is how many writes Analyze may be ahead of the stager
+// through the pipe that carries the decompressed stream (spec "Budgets").
+const stagePipeSlots = 8
 
 // tarHeaderSize is one tar block; the first block of a tar is a header.
 const tarHeaderSize = 512
@@ -36,11 +86,13 @@ const maxZstdWindow = 128 << 20
 // spoolDir is the directory zrecipe spills its decompressed spool to.
 func (b *Store) spoolDir() string { return filepath.Join(b.opts.WorkDir, spoolDirName) }
 
-// analyze runs zrecipe's first pass under the analyze deadline and
-// classifies the result (spec finalization steps 4 and 5). It returns an
-// error only for failures that must fail the upload: the request context
-// ended, an I/O error, an unexpected zrecipe error. Every fallback case
-// is a raw decision carrying its reason.
+// analyze runs zrecipe's first pass under the analyze deadline while the
+// speculative decompose stages the stream (spec "Speculative decompose"),
+// and classifies the result. It returns an error only for failures that
+// must fail the upload: the request context ended, an I/O error, an
+// unexpected zrecipe error, a pack file that could not be created. Every
+// fallback case is a raw decision carrying its reason; a prism decision
+// carries the staged pack, which the caller must drop or commit.
 func (b *Store) analyze(ctx context.Context, sp *upload.Spool) (decision, error) {
 	if err := ctx.Err(); err != nil {
 		return decision{}, fmt.Errorf("blob: analyze: %w", err)
@@ -93,14 +145,49 @@ func (b *Store) analyze(ctx context.Context, sp *upload.Spool) (decision, error)
 		// reason, or fails the upload on a spool I/O error.
 	}
 
+	// A stream Detect reports as none is a tar candidate only if it starts
+	// with a tar header; decide that before anything is staged so that a
+	// config blob never touches the pack writer and keeps reason not-tar.
+	if f == zrecipe.FormatNone {
+		ok, err := startsWithTarHeader(r)
+		if err != nil {
+			return decision{}, fmt.Errorf("blob: reading tar header: %w", err)
+		}
+		if !ok {
+			return decision{kind: KindRaw, reason: ReasonNotTar, format: format}, nil
+		}
+	}
+
+	// Every remaining stream is a tar candidate. Its decompressed form is
+	// taken apart and staged in a pack while Analyze inflates and searches
+	// it (spec "Speculative decompose"): the pack is inserted into the
+	// store only once params are known and dropped on every other outcome.
+	pw, err := b.st.NewPackWriter(ctx, b.spoolDir())
+	if err != nil {
+		return decision{}, fmt.Errorf("blob: %w", err)
+	}
+	p := newPipe(stagePipeSlots)
+	done := make(chan *staged, 1)
+	go func() { done <- b.stage(ctx, p, pw) }()
+
 	actx, cancel := context.WithTimeout(ctx, b.opts.AnalyzeTimeout)
 	defer cancel()
 	params, err := zrecipe.Analyze(actx, r, &zrecipe.Options{
-		TempDir:     b.spoolDir(),
-		MaxInMemory: b.opts.MaxInMemory,
-		Parallelism: b.opts.AnalyzeParallelism,
+		TempDir:      b.spoolDir(),
+		MaxInMemory:  b.opts.MaxInMemory,
+		Parallelism:  b.opts.AnalyzeParallelism,
+		Uncompressed: p,
 	})
+	// Analyze has written everything it will: end the stream for the
+	// stager (its error, so a failed Analyze makes the stager's next read
+	// fail instead of reporting a clean end) and collect the stager.
+	p.CloseWrite(err)
+	s := <-done
 	if err != nil {
+		s.drop()
+		if s.err != nil {
+			b.log.Debug("staging discarded", "digest", sp.Digest(), "error", s.err)
+		}
 		switch {
 		case ctx.Err() != nil:
 			return decision{}, fmt.Errorf("blob: analyze: %w", ctx.Err())
@@ -119,19 +206,51 @@ func (b *Store) analyze(ctx context.Context, sp *upload.Spool) (decision, error)
 	}
 	// Analyze does not observe ctx on uncompressed input.
 	if err := ctx.Err(); err != nil {
+		s.drop()
 		return decision{}, fmt.Errorf("blob: analyze: %w", err)
 	}
-	format = string(params.Format)
-	if params.Format == zrecipe.FormatNone {
-		ok, err := startsWithTarHeader(r)
-		if err != nil {
-			return decision{}, fmt.Errorf("blob: reading tar header: %w", err)
-		}
-		if !ok {
-			return decision{kind: KindRaw, reason: ReasonNotTar, format: format}, nil
+	return decision{kind: KindPrism, params: params, format: string(params.Format), staged: s}, nil
+}
+
+// stage runs the speculative decompose on its own goroutine: it reads the
+// decompressed stream from p, hashes it with BLAKE3 and sha256, takes the
+// tar apart with the amber sink over the pack writer w and returns what
+// it left behind. It always reads p to its end, so Analyze, which writes
+// p, is never blocked or failed by the stager; after a failure the rest
+// of the stream is discarded and the pack writer aborted.
+func (b *Store) stage(ctx context.Context, p *pipe, w *store.Writer) *staged {
+	s := &staged{}
+	b3 := blake3.New(32, nil)
+	s256 := sha256.New()
+	counter := &byteCounter{r: io.TeeReader(&streamReader{r: p}, io.MultiWriter(b3, s256))}
+	sink := newAmberSink(w)
+	err := tarprism.DecomposeTo(counter, sink)
+	sink.closeRecipe()
+	// Read whatever is left of the stream so Analyze never blocks on a
+	// full pipe: after a failure the bytes are discarded; after a success
+	// there are none, tar-prism reads to EOF, and if it ever stopped short
+	// the hashes below would not match params and check would say so.
+	io.Copy(io.Discard, p)
+	if err == nil {
+		s.recipe, s.blobs, err = sink.finish()
+	}
+	if err == nil {
+		if _, cerr := w.Close(); cerr != nil {
+			err = &sinkError{cerr}
 		}
 	}
-	return decision{kind: KindPrism, params: params, format: format}, nil
+	if err != nil {
+		w.Abort()
+		s.err = classifyDecomposeError(ctx, err)
+		return s
+	}
+	s.pack = w.Pack()
+	s.index = sink.index
+	s.entries = sink.entries
+	s.diffID = oci.DigestFromSum(s256.Sum(nil))
+	s.blake3 = hex.EncodeToString(b3.Sum(nil))
+	s.size = counter.n
+	return s
 }
 
 // startsWithCompressedTarHeader reports whether the first 512 decompressed
