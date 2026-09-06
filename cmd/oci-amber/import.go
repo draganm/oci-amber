@@ -40,6 +40,7 @@ type importConfig struct {
 	AnalyzeParallelism    int
 	AnalyzeTimeout        time.Duration
 	MaxConcurrentFinalize int
+	VerifyLimit           int64
 	VerifyRoundTrip       bool
 	AllowRaw              bool
 	LogLevel              slog.Level
@@ -87,6 +88,11 @@ func importConfigFromCLI(c *cli.Context) (importConfig, error) {
 		return importConfig{}, fmt.Errorf("--max-in-memory: %w", err)
 	}
 	cfg.MaxInMemory = size
+	limit, err := parseSize(c.String("verify-limit"))
+	if err != nil {
+		return importConfig{}, fmt.Errorf("--verify-limit: %w", err)
+	}
+	cfg.VerifyLimit = limit
 	if cfg.AnalyzeParallelism < 1 {
 		return importConfig{}, fmt.Errorf("--analyze-parallelism must be at least 1, got %d", cfg.AnalyzeParallelism)
 	}
@@ -209,6 +215,7 @@ func runImport(ctx context.Context, cfg importConfig) error {
 		AnalyzeParallelism:    cfg.AnalyzeParallelism,
 		AnalyzeTimeout:        cfg.AnalyzeTimeout,
 		MaxConcurrentFinalize: cfg.MaxConcurrentFinalize,
+		VerifyLimit:           cfg.VerifyLimit,
 		VerifyRoundTrip:       cfg.VerifyRoundTrip,
 		AllowRaw:              cfg.AllowRaw,
 		RecentTTL:             importRecentTTL,

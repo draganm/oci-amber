@@ -63,6 +63,7 @@ func TestServeFlagDefaults(t *testing.T) {
 		AnalyzeParallelism:    2,
 		AnalyzeTimeout:        15 * time.Minute,
 		MaxConcurrentFinalize: max(1, runtime.NumCPU()/2),
+		VerifyLimit:           150 << 20,
 		VerifyRoundTrip:       false,
 		AllowRaw:              false,
 		UploadTimeout:         time.Hour,
@@ -84,6 +85,7 @@ func TestServeFlagsExplicit(t *testing.T) {
 		"--analyze-parallelism", "4",
 		"--analyze-timeout", "1m",
 		"--max-concurrent-finalize", "3",
+		"--verify-limit", "1MiB",
 		"--verify-roundtrip",
 		"--allow-raw",
 		"--upload-timeout", "30m",
@@ -101,6 +103,7 @@ func TestServeFlagsExplicit(t *testing.T) {
 		AnalyzeParallelism:    4,
 		AnalyzeTimeout:        time.Minute,
 		MaxConcurrentFinalize: 3,
+		VerifyLimit:           1 << 20,
 		VerifyRoundTrip:       true,
 		AllowRaw:              true,
 		UploadTimeout:         30 * time.Minute,
@@ -121,6 +124,7 @@ func TestServeFlagsFromEnv(t *testing.T) {
 	t.Setenv("OCI_AMBER_ANALYZE_PARALLELISM", "3")
 	t.Setenv("OCI_AMBER_ANALYZE_TIMEOUT", "2m")
 	t.Setenv("OCI_AMBER_MAX_CONCURRENT_FINALIZE", "5")
+	t.Setenv("OCI_AMBER_VERIFY_LIMIT", "2MiB")
 	t.Setenv("OCI_AMBER_VERIFY_ROUNDTRIP", "true")
 	t.Setenv("OCI_AMBER_ALLOW_RAW", "true")
 	t.Setenv("OCI_AMBER_UPLOAD_TIMEOUT", "45m")
@@ -139,6 +143,7 @@ func TestServeFlagsFromEnv(t *testing.T) {
 		AnalyzeParallelism:    3,
 		AnalyzeTimeout:        2 * time.Minute,
 		MaxConcurrentFinalize: 5,
+		VerifyLimit:           2 << 20,
 		VerifyRoundTrip:       true,
 		AllowRaw:              true,
 		UploadTimeout:         45 * time.Minute,
@@ -172,6 +177,8 @@ func TestServeRejectsBadValues(t *testing.T) {
 		{"bad size", []string{"--store", "/s", "--max-in-memory", "lots"}, "--max-in-memory"},
 		{"negative size", []string{"--store", "/s", "--max-in-memory", "-1"}, "--max-in-memory"},
 		{"bad log level", []string{"--store", "/s", "--log-level", "verbose"}, "--log-level"},
+		{"bad verify limit", []string{"--store", "/s", "--verify-limit", "lots"}, "--verify-limit"},
+		{"negative verify limit", []string{"--store", "/s", "--verify-limit", "-1"}, "--verify-limit"},
 		{"zero parallelism", []string{"--store", "/s", "--analyze-parallelism", "0"}, "--analyze-parallelism must be at least 1"},
 		{"zero analyze timeout", []string{"--store", "/s", "--analyze-timeout", "0"}, "--analyze-timeout must be positive"},
 		{"zero finalize", []string{"--store", "/s", "--max-concurrent-finalize", "0"}, "--max-concurrent-finalize must be at least 1"},
@@ -199,5 +206,18 @@ func TestServeRejectsBadEnvValue(t *testing.T) {
 	_, err := runApp(t, "--store", "/s")
 	if err == nil || !strings.Contains(err.Error(), "OCI_AMBER_ANALYZE_PARALLELISM") {
 		t.Fatalf("expected an error naming the environment variable, got %v", err)
+	}
+}
+
+// TestServeVerifyLimitZeroVerifiesWholeLayer: 0 is the documented way to
+// verify every byte again.
+func TestServeVerifyLimitZeroVerifiesWholeLayer(t *testing.T) {
+	clearEnv(t)
+	cfg, err := runApp(t, "--store", "/srv/amber", "--verify-limit", "0")
+	if err != nil {
+		t.Fatalf("serve: %v", err)
+	}
+	if cfg.VerifyLimit != 0 {
+		t.Fatalf("VerifyLimit = %d, want 0", cfg.VerifyLimit)
 	}
 }

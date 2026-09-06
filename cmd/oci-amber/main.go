@@ -48,6 +48,7 @@ const (
 
 	defaultListen             = ":5000"
 	defaultMaxInMemory        = "64MiB"
+	defaultVerifyLimit        = "150MiB"
 	defaultAnalyzeParallelism = 2
 	defaultAnalyzeTimeout     = 15 * time.Minute
 	defaultUploadTimeout      = time.Hour
@@ -64,6 +65,7 @@ type config struct {
 	AnalyzeParallelism    int
 	AnalyzeTimeout        time.Duration
 	MaxConcurrentFinalize int
+	VerifyLimit           int64
 	VerifyRoundTrip       bool
 	AllowRaw              bool
 	UploadTimeout         time.Duration
@@ -218,6 +220,7 @@ func storeFlags() []cli.Flag {
 		&cli.IntFlag{Name: "analyze-parallelism", Value: defaultAnalyzeParallelism, Usage: "zrecipe candidate `workers` per blob", EnvVars: envVar("analyze-parallelism")},
 		&cli.DurationFlag{Name: "analyze-timeout", Value: defaultAnalyzeTimeout, Usage: "per-blob analyze `deadline`; on expiry the blob cannot be a prism (see --allow-raw)", EnvVars: envVar("analyze-timeout")},
 		&cli.IntFlag{Name: "max-concurrent-finalize", Value: defaultMaxConcurrentFinalize(), Usage: "concurrent blob finalizations (`count`, default NumCPU/2, minimum 1)", EnvVars: envVar("max-concurrent-finalize")},
+		&cli.StringFlag{Name: "verify-limit", Value: defaultVerifyLimit, Usage: "accept a layer's recompression once this much of its compressed `size` has been reproduced instead of recompressing all of it (same units as --max-in-memory); 0 verifies every byte", EnvVars: envVar("verify-limit")},
 		&cli.BoolFlag{Name: "verify-roundtrip", Value: false, Usage: "diagnostic: also run the full pull pipeline over every prism before publishing it; a mismatch is a round-trip failure", EnvVars: envVar("verify-roundtrip")},
 		&cli.BoolFlag{Name: "allow-raw", Usage: "store a layer raw when it cannot be stored as a prism, instead of refusing the upload; blobs that are not tars are always stored raw", EnvVars: envVar("allow-raw")},
 		&cli.StringFlag{Name: "log-level", Value: defaultLogLevel, Usage: "log `level`: debug, info, warn or error", EnvVars: envVar("log-level")},
@@ -262,6 +265,11 @@ func configFromCLI(c *cli.Context) (config, error) {
 		return config{}, fmt.Errorf("--max-in-memory: %w", err)
 	}
 	cfg.MaxInMemory = size
+	limit, err := parseSize(c.String("verify-limit"))
+	if err != nil {
+		return config{}, fmt.Errorf("--verify-limit: %w", err)
+	}
+	cfg.VerifyLimit = limit
 	if cfg.AnalyzeParallelism < 1 {
 		return config{}, fmt.Errorf("--analyze-parallelism must be at least 1, got %d", cfg.AnalyzeParallelism)
 	}
@@ -328,6 +336,7 @@ func run(ctx context.Context, cfg config) error {
 		AnalyzeParallelism:    cfg.AnalyzeParallelism,
 		AnalyzeTimeout:        cfg.AnalyzeTimeout,
 		MaxConcurrentFinalize: cfg.MaxConcurrentFinalize,
+		VerifyLimit:           cfg.VerifyLimit,
 		VerifyRoundTrip:       cfg.VerifyRoundTrip,
 		AllowRaw:              cfg.AllowRaw,
 		RecentTTL:             cfg.UploadTimeout,
@@ -362,6 +371,7 @@ func run(ctx context.Context, cfg config) error {
 		"analyze_parallelism", cfg.AnalyzeParallelism,
 		"analyze_timeout", cfg.AnalyzeTimeout,
 		"max_concurrent_finalize", cfg.MaxConcurrentFinalize,
+		"verify_limit", cfg.VerifyLimit,
 		"verify_roundtrip", cfg.VerifyRoundTrip,
 		"allow_raw", cfg.AllowRaw,
 		"upload_timeout", cfg.UploadTimeout,

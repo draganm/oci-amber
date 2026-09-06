@@ -766,3 +766,65 @@ func TestPutPgzipLayer(t *testing.T) {
 		t.Fatalf("log:\n%s", logs.String())
 	}
 }
+
+// TestPutVerifyLimitStoresPrism: with VerifyLimit below the layer's
+// compressed size the confirming pass stops early, the layer is still a
+// prism and pulls back byte for byte.
+func TestPutVerifyLimitStoresPrism(t *testing.T) {
+	const limit = 64 << 10
+	b, _, _ := newTestStore(t, Options{VerifyLimit: limit})
+	tarData := prismTar(t, prismFixtureFiles(t))
+	data := gzipBytes(t, tarData, gzip.DefaultCompression)
+	if len(data) <= limit {
+		t.Fatalf("fixture compresses to %d bytes, want more than the limit %d", len(data), limit)
+	}
+	meta := putPrism(t, b, data)
+	if meta.Kind != KindPrism {
+		t.Fatalf("kind = %q (reason %q), want %q", meta.Kind, meta.RawReason, KindPrism)
+	}
+	if got, _ := pullPrism(t, b, meta.Digest); !bytes.Equal(got, data) {
+		t.Fatalf("pull returned %d bytes, want the %d uploaded", len(got), len(data))
+	}
+}
+
+// TestPutVerifyLimitAcceptsLateDivergence pins the trade VerifyLimit
+// makes: a layer whose compression changes past the limit (a two-level
+// gzip, the shape TestPutRefusesNonReproducibleByDefault refuses) is
+// stored as a prism, and the divergence surfaces on pull as an error from
+// the recompression's digest check instead. The switch sits at 34 MiB of a
+// 36 MiB tar: zrecipe's elimination grows its window fourfold from 128 KiB
+// and feeds the survivor as far as the window in which the last buffering
+// candidate (pigz and pgzip with 4 MiB blocks, whose output surfaces
+// asynchronously) died, 8 MiB or 32 MiB, plus a margin, so only the
+// confirming pass can see the switch, and the limit stops that pass long
+// before it.
+func TestPutVerifyLimitAcceptsLateDivergence(t *testing.T) {
+	const limit = 64 << 10
+	tarData := prismTar(t, []prismFile{
+		{name: "usr/share/a.txt", data: textBytes(18<<20, 1)},
+		{name: "usr/share/b.txt", data: textBytes(18<<20, 2)},
+	})
+	switchAt := 34 << 20
+	if len(tarData) <= switchAt {
+		t.Fatalf("tar is %d bytes, want more than %d", len(tarData), switchAt)
+	}
+	data := twoLevelGzip(t, tarData[:switchAt], tarData[switchAt:])
+	// The switch must lie past the limit in compressed bytes; the first MiB
+	// alone compressing to more than the limit shows that cheaply.
+	if got := len(gzipBytes(t, tarData[:1<<20], gzip.BestSpeed)); got <= limit {
+		t.Fatalf("the first MiB compresses to %d bytes, want more than the limit %d", got, limit)
+	}
+	b, _, _ := newTestStore(t, Options{VerifyLimit: limit})
+	meta := putPrism(t, b, data)
+	if meta.Kind != KindPrism {
+		t.Fatalf("kind = %q (reason %q), want %q: the divergence lies past the limit", meta.Kind, meta.RawReason, KindPrism)
+	}
+	bl, err := b.Open(meta.Digest)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	var buf bytes.Buffer
+	if err := bl.WriteTo(context.Background(), &buf); err == nil {
+		t.Fatal("pull succeeded; want the divergence past the limit to surface as an error")
+	}
+}
