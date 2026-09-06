@@ -217,7 +217,7 @@ Measured on an M4 Pro with real Docker Hub layers. For a 61 MiB go-flate layer (
   size ÷ engine speed whatever the pool does. Done since: the importer
   feeds the largest absent blobs first (longest-processing-time-first),
   and zrecipe hands survivors that all agree past 4 MiB to `Run`
-  (draganm/zrecipe#7), which cut the pigz layer's analyze from 9.4 s to
+  (draganm/zrecipe#7, released as v0.5.2 and pinned here), which cut the pigz layer's analyze from 9.4 s to
   3.3 s (its parallel and single-thread candidates agree over the whole
   input, and the lockstep ran the single-thread one on one core). Whole
   import of rust:1.94-bookworm: 20.0 s to 17.3 s, bounded by the two
