@@ -828,3 +828,72 @@ func TestPutVerifyLimitAcceptsLateDivergence(t *testing.T) {
 		t.Fatal("pull succeeded; want the divergence past the limit to surface as an error")
 	}
 }
+
+// containersImageZstd compresses data the way containers/image (skopeo,
+// podman, buildah) compresses an uncompressed layer to zstd: the 8 bytes
+// it peeked at to detect the source compression go through Write, the
+// rest through klauspost's Encoder.ReadFrom, which flushes those 8 bytes
+// as a raw block of their own first. Level 6 in zstd terms is klauspost's
+// SpeedBetterCompression.
+func containersImageZstd(t *testing.T, data []byte) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	enc, err := zstd.NewWriter(&buf, zstd.WithEncoderLevel(zstd.EncoderLevelFromZstd(6)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := enc.Write(data[:8]); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := enc.ReadFrom(bytes.NewReader(data[8:])); err != nil {
+		t.Fatal(err)
+	}
+	if err := enc.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
+
+// TestPutContainersImageZstdLayer guards zrecipe's head-block support
+// (v0.7.0): a zstd layer as podman push or skopeo make it from an
+// uncompressed source is stored as a prism and pulled back byte for byte.
+func TestPutContainersImageZstdLayer(t *testing.T) {
+	b, _, logs := newTestStore(t, Options{VerifyRoundTrip: true})
+	ctx := context.Background()
+	var tarBuf bytes.Buffer
+	tw := tar.NewWriter(&tarBuf)
+	for i, size := range []int{1500_000, 900_000, 1_200_000} {
+		content := textBytes(size, int64(i+1))
+		if err := tw.WriteHeader(&tar.Header{Name: fmt.Sprintf("usr/lib/lib%d.so", i), Mode: 0o644, Size: int64(len(content))}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tw.Write(content); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	layer := containersImageZstd(t, tarBuf.Bytes())
+	meta, err := b.Put(ctx, spoolOf(layer))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if meta.Kind != KindPrism || meta.Engine != "klauspost-zstd" || meta.Entries != 3 {
+		t.Fatalf("meta = kind %s engine %q entries %d, want prism/klauspost-zstd/3 (%s)", meta.Kind, meta.Engine, meta.Entries, meta.RawReason)
+	}
+	bl, err := b.Open(meta.Digest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if err := bl.WriteTo(ctx, &out); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(out.Bytes(), layer) {
+		t.Fatal("pulled bytes differ from the pushed layer")
+	}
+	if !strings.Contains(logs.String(), "engine=klauspost-zstd") {
+		t.Fatalf("logs do not name the engine:\n%s", logs.String())
+	}
+}
