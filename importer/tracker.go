@@ -267,16 +267,25 @@ func (t *Tracker) BlobStage(d oci.Digest, s blob.Stage) {
 	r.Progress = 0
 	switch s {
 	case blob.StageAnalyze:
-		r.stageBase, r.stageShare = 0, 0.5
-	case blob.StageCommit:
-		r.stageBase = 0.5
 		if t.opts.Verify {
-			r.stageShare = 0.25
+			r.stageBase, r.stageShare = 0, 0.35
 		} else {
-			r.stageShare = 0.5
+			r.stageBase, r.stageShare = 0, 0.4
+		}
+	case blob.StageConfirm:
+		if t.opts.Verify {
+			r.stageBase, r.stageShare = 0.35, 0.3
+		} else {
+			r.stageBase, r.stageShare = 0.4, 0.35
+		}
+	case blob.StageCommit:
+		if t.opts.Verify {
+			r.stageBase, r.stageShare = 0.65, 0.2
+		} else {
+			r.stageBase, r.stageShare = 0.75, 0.25
 		}
 	case blob.StageVerify:
-		r.stageBase, r.stageShare = 0.75, 0.25
+		r.stageBase, r.stageShare = 0.85, 0.15
 	default: // raw: from wherever the previous stage ended to the end
 		r.stageBase, r.stageShare = prevEnd, 1-prevEnd
 	}

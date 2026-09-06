@@ -57,19 +57,22 @@ func TestTrackerFractionsThroughPrismStages(t *testing.T) {
 	tr.BlobProgress(digest("a"), 500)
 	s := tr.Snapshot()
 	row := rowFor(t, s, "a")
-	approx(t, "analyze half", row.Fraction, 0.25) // 0.5 share × 0.5
-	approx(t, "overall", s.Fraction, 250.0/4000)
+	approx(t, "analyze half", row.Fraction, 0.175) // 0.35 share × 0.5
+	approx(t, "overall", s.Fraction, 175.0/4000)
 	if s.Counts.InFlight != 1 || s.Counts.Pending != 1 {
 		t.Fatalf("counts = %+v", s.Counts)
 	}
 	tr.BlobProgress(digest("a"), 1000)
+	tr.BlobStage(digest("a"), blob.StageConfirm)
+	approx(t, "confirm start", rowFor(t, tr.Snapshot(), "a").Fraction, 0.35)
+	tr.BlobProgress(digest("a"), 1000)
 	tr.BlobStage(digest("a"), blob.StageCommit)
-	approx(t, "commit start", rowFor(t, tr.Snapshot(), "a").Fraction, 0.5)
+	approx(t, "commit start", rowFor(t, tr.Snapshot(), "a").Fraction, 0.65)
 	tr.BlobProgress(digest("a"), 1000)
 	tr.BlobStage(digest("a"), blob.StageVerify)
-	approx(t, "verify start", rowFor(t, tr.Snapshot(), "a").Fraction, 0.75)
+	approx(t, "verify start", rowFor(t, tr.Snapshot(), "a").Fraction, 0.85)
 	tr.BlobProgress(digest("a"), 500)
-	approx(t, "verify half", rowFor(t, tr.Snapshot(), "a").Fraction, 0.875)
+	approx(t, "verify half", rowFor(t, tr.Snapshot(), "a").Fraction, 0.925)
 	tr.Done(digest("a"), &blob.Meta{Digest: digest("a"), Size: 1000, Kind: blob.KindPrism})
 	s = tr.Snapshot()
 	if r := rowFor(t, s, "a"); r.State != BlobDone || r.Fraction != 1 || r.Kind != blob.KindPrism {
@@ -78,35 +81,37 @@ func TestTrackerFractionsThroughPrismStages(t *testing.T) {
 	approx(t, "overall after a", s.Fraction, 0.25)
 }
 
-func TestTrackerWithoutVerifyCommitTakesHalf(t *testing.T) {
+func TestTrackerWithoutVerifyStages(t *testing.T) {
 	tr := NewTracker(TrackerOptions{Verify: false, Now: time.Now})
 	tr.Queue(plan(map[string]int64{"a": 100}))
 	tr.StartBlobs()
 	tr.Start(digest("a"))
 	tr.BlobStage(digest("a"), blob.StageAnalyze)
+	tr.BlobStage(digest("a"), blob.StageConfirm)
+	approx(t, "confirm start, no verify", rowFor(t, tr.Snapshot(), "a").Fraction, 0.4)
 	tr.BlobStage(digest("a"), blob.StageCommit)
 	tr.BlobProgress(digest("a"), 50)
-	approx(t, "commit half, no verify", rowFor(t, tr.Snapshot(), "a").Fraction, 0.75)
+	approx(t, "commit half, no verify", rowFor(t, tr.Snapshot(), "a").Fraction, 0.875)
 }
 
 func TestTrackerRawTakesTheRemainder(t *testing.T) {
 	tr := NewTracker(TrackerOptions{Verify: true, Now: time.Now})
 	tr.Queue(plan(map[string]int64{"a": 100, "b": 100, "c": 100}))
 	tr.StartBlobs()
-	// raw right after analyze: 0.5 + 0.5 × n/size
+	// raw right after analyze: 0.35 + 0.65 × n/size
 	tr.Start(digest("a"))
 	tr.BlobStage(digest("a"), blob.StageAnalyze)
 	tr.BlobStage(digest("a"), blob.StageRaw)
 	tr.BlobProgress(digest("a"), 50)
-	approx(t, "raw after analyze", rowFor(t, tr.Snapshot(), "a").Fraction, 0.75)
-	// raw after commit (downgrade): 0.75 + 0.25 × n/size
+	approx(t, "raw after analyze", rowFor(t, tr.Snapshot(), "a").Fraction, 0.675)
+	// raw after confirm (decompose downgrade): 0.65 + 0.35 × n/size
 	tr.Start(digest("b"))
 	tr.BlobStage(digest("b"), blob.StageAnalyze)
-	tr.BlobStage(digest("b"), blob.StageCommit)
+	tr.BlobStage(digest("b"), blob.StageConfirm)
 	tr.BlobProgress(digest("b"), 100)
 	tr.BlobStage(digest("b"), blob.StageRaw)
 	tr.BlobProgress(digest("b"), 50)
-	approx(t, "raw after commit", rowFor(t, tr.Snapshot(), "b").Fraction, 0.875)
+	approx(t, "raw after confirm", rowFor(t, tr.Snapshot(), "b").Fraction, 0.825)
 	// progress in a stage never pushes the fraction past the stage's end
 	tr.BlobProgress(digest("b"), 100)
 	approx(t, "raw complete", rowFor(t, tr.Snapshot(), "b").Fraction, 1)
@@ -129,7 +134,7 @@ func TestTrackerPresentBlobsAreOutsideTheEstimate(t *testing.T) {
 	tr.Start(digest("a"))
 	tr.BlobStage(digest("a"), blob.StageAnalyze)
 	tr.BlobProgress(digest("a"), 1000)
-	approx(t, "overall ignores present", tr.Snapshot().Fraction, 0.5)
+	approx(t, "overall ignores present", tr.Snapshot().Fraction, 0.35)
 	// A dedup hit inside Put reports no stage: Done without a stage counts as present.
 	tr2 := NewTracker(TrackerOptions{Verify: true, Now: c.now})
 	tr2.Queue(plan(map[string]int64{"a": 1000}))
@@ -143,20 +148,20 @@ func TestTrackerPresentBlobsAreOutsideTheEstimate(t *testing.T) {
 
 func TestTrackerETA(t *testing.T) {
 	c := &clock{t: time.Unix(1000, 0)}
-	tr := NewTracker(TrackerOptions{Verify: true, Now: c.now})
+	tr := NewTracker(TrackerOptions{Verify: false, Now: c.now})
 	tr.Queue(plan(map[string]int64{"a": 1000, "b": 1000}))
 	tr.StartBlobs()
 	tr.Start(digest("a"))
 	tr.BlobStage(digest("a"), blob.StageAnalyze)
 	c.advance(time.Second)
-	tr.BlobProgress(digest("a"), 1000) // fraction 0.5 of a → 500 of 2000 bytes in 1 s
+	tr.BlobProgress(digest("a"), 1000) // analyze full: fraction 0.4 of a → 400 of 2000 bytes in 1 s
 	if s := tr.Snapshot(); s.ETAKnown {
 		t.Fatalf("ETA known before the warm-up: %+v", s)
 	}
-	c.advance(time.Second) // 2 s elapsed, still 500 done → rate 250 B/s → 1500 left → 6 s
+	c.advance(time.Second) // 2 s elapsed, still 400 done → rate 200 B/s → 1600 left → 8 s
 	s := tr.Snapshot()
-	if !s.ETAKnown || s.ETA != 6*time.Second {
-		t.Fatalf("ETA = %v (known %v), want 6s", s.ETA, s.ETAKnown)
+	if !s.ETAKnown || s.ETA != 8*time.Second {
+		t.Fatalf("ETA = %v (known %v), want 8s", s.ETA, s.ETAKnown)
 	}
 	if s.Elapsed != 2*time.Second {
 		t.Fatalf("Elapsed = %v", s.Elapsed)
