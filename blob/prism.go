@@ -293,11 +293,13 @@ func classifyDecomposeError(ctx context.Context, err error) error {
 // staging outcome is judged first, then the pack and comp.json go into the
 // store through one accounting writer, then, when VerifyRoundTrip is set,
 // the pull pipeline runs over the fresh objects. It returns a *rawFallback
-// when the spec stores the blob raw instead (decompose-failed,
-// roundtrip-failed; both logged at error level), the context's error when
-// the request went away, and any other error when the upload must fail.
-// Objects written before a failure are left to GC; the pack is released
-// on every path.
+// when the blob cannot be kept as a prism (decompose-failed,
+// roundtrip-failed), the context's error when the request went away, and
+// any other error when the upload must fail. Put decides what a fallback
+// becomes: the "storing raw" lines are logged here at error level only
+// when AllowRaw makes that the outcome, since a refusal gets its own line
+// from refuseRaw. Objects written before a failure are left to GC; the
+// pack is released on every path.
 func (b *Store) finalizePrism(ctx context.Context, dec decision, d oci.Digest, size int64) (prismResult, store.Stats, error) {
 	s, params := dec.staged, dec.params
 	if s == nil || params == nil {
@@ -310,7 +312,9 @@ func (b *Store) finalizePrism(ctx context.Context, dec decision, d oci.Digest, s
 		}
 		var de *decomposeError
 		if errors.As(err, &de) {
-			b.log.Error("decompose failed, storing raw", "digest", d, "format", params.Format, "engine", params.Engine, "error", err)
+			if b.opts.AllowRaw {
+				b.log.Error("decompose failed, storing raw", "digest", d, "format", params.Format, "engine", params.Engine, "error", err)
+			}
 			return prismResult{}, store.Stats{}, &rawFallback{reason: ReasonDecomposeFailed, err: err}
 		}
 		return prismResult{}, store.Stats{}, err
@@ -343,7 +347,9 @@ func (b *Store) finalizePrism(ctx context.Context, dec decision, d oci.Digest, s
 			if cerr := ctx.Err(); cerr != nil {
 				return prismResult{}, store.Stats{}, cerr
 			}
-			b.log.Error("round-trip verification failed, storing raw", "digest", d, "format", params.Format, "engine", params.Engine, "engine_version", params.EngineVersion, "error", err)
+			if b.opts.AllowRaw {
+				b.log.Error("round-trip verification failed, storing raw", "digest", d, "format", params.Format, "engine", params.Engine, "engine_version", params.EngineVersion, "error", err)
+			}
 			return prismResult{}, store.Stats{}, &rawFallback{reason: ReasonRoundTripFailed, err: err}
 		}
 	}

@@ -3,9 +3,13 @@ package registry_test
 import (
 	"archive/tar"
 	"bytes"
+	"compress/flate"
 	"compress/gzip"
+	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"hash/crc32"
 	"io"
 	"io/fs"
 	"log/slog"
@@ -150,7 +154,13 @@ type e2eEnv struct {
 	m1, m2, idx, art, base oci.Digest // manifest digests recorded during push
 }
 
-func newE2EEnv(t *testing.T) *e2eEnv {
+func newE2EEnv(t *testing.T) *e2eEnv { return newE2EEnvAllowRaw(t, false) }
+
+// newE2EEnvAllowRaw builds the environment with blob.Options.AllowRaw as
+// given. The scenario runs with it off: its layers all become prisms and
+// its other blobs are not tars, which are stored raw whatever the setting.
+// TestE2ERawRefused needs both.
+func newE2EEnvAllowRaw(t *testing.T, allowRaw bool) *e2eEnv {
 	t.Helper()
 	logs := &e2eLogBuffer{}
 	log := slog.New(slog.NewJSONHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
@@ -182,6 +192,7 @@ func newE2EEnv(t *testing.T) *e2eEnv {
 		AnalyzeTimeout:        15 * time.Minute,
 		MaxConcurrentFinalize: 2,
 		VerifyRoundTrip:       true,
+		AllowRaw:              allowRaw,
 		RecentTTL:             time.Hour,
 	}, log)
 	if err != nil {
@@ -2029,4 +2040,136 @@ func e2eReadTar(t *testing.T, body []byte) map[string]string {
 		out[strings.TrimSuffix(hdr.Name, "/")] = string(data)
 	}
 	return out
+}
+
+// ---------------------------------------------------------------------------
+// Raw refusal
+
+// e2eTwoLevelGzip builds one gzip member whose deflate payload comes from
+// two compress/flate writers at different levels joined at a sync-flush
+// boundary. It inflates fine, but no single-pass encoder emits an empty
+// stored block followed by a restarted compressor at another level, so
+// zrecipe cannot reproduce it (the blob package's tests use the same
+// construction).
+func e2eTwoLevelGzip(t *testing.T, part1, part2 []byte) []byte {
+	t.Helper()
+	var payload bytes.Buffer
+	w1, err := flate.NewWriter(&payload, flate.BestSpeed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w1.Write(part1); err != nil {
+		t.Fatal(err)
+	}
+	if err := w1.Flush(); err != nil { // non-final blocks, byte aligned
+		t.Fatal(err)
+	}
+	w2, err := flate.NewWriter(&payload, flate.BestCompression)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w2.Write(part2); err != nil {
+		t.Fatal(err)
+	}
+	if err := w2.Close(); err != nil { // final block
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	out.Write([]byte{0x1f, 0x8b, 8, 0, 0, 0, 0, 0, 0, 0xff})
+	out.Write(payload.Bytes())
+	crc := crc32.NewIEEE()
+	crc.Write(part1)
+	crc.Write(part2)
+	var trailer [8]byte
+	binary.LittleEndian.PutUint32(trailer[0:4], crc.Sum32())
+	binary.LittleEndian.PutUint32(trailer[4:8], uint32(len(part1)+len(part2)))
+	out.Write(trailer[:])
+	return out.Bytes()
+}
+
+// TestE2ERawRefused pushes a layer zrecipe cannot reproduce. Without
+// AllowRaw the registry answers 400 BLOB_UPLOAD_INVALID with a message
+// that names the layer, the reason and --allow-raw, publishes nothing, and
+// drops the session and its spool, since a retry could only be refused
+// again; with AllowRaw the same push stores the layer raw as
+// not-reproducible, as every push did before the flag existed. The layer
+// is bigger than e2eMaxInMemory so the session is file-backed and the
+// spool removal is observable on disk.
+func TestE2ERawRefused(t *testing.T) {
+	tarData := e2eTar(t, []e2eEntry{
+		{name: "usr/lib/libbig.so", data: e2eRandom(21, 1200<<10)},
+		{name: "etc/motd", data: bytes.Repeat([]byte("welcome\n"), 512)},
+	})
+	layer := e2eTwoLevelGzip(t, tarData[:len(tarData)/2], tarData[len(tarData)/2:])
+	if len(layer) <= e2eMaxInMemory {
+		t.Fatalf("fixture is %d bytes, want more than the %d byte in-memory limit", len(layer), e2eMaxInMemory)
+	}
+	d := oci.DigestOfBytes(layer)
+
+	t.Run("refused", func(t *testing.T) {
+		e := newE2EEnvAllowRaw(t, false)
+		c := e.c
+		// POST then PUT with the body, the containerd style: the one where
+		// a session the client could retry on exists.
+		uploadURL, uuid := c.startUpload(e2eApp)
+		resp, body := c.do(http.MethodPut, c.withDigest(uploadURL, d), layer, map[string]string{"Content-Type": e2eOctetStream})
+		oerr := c.expectError(resp, body, http.StatusBadRequest, oci.CodeBlobUploadInvalid)
+		for _, want := range []string{d.String(), string(blob.ReasonNotReproducible), "--allow-raw"} {
+			if !strings.Contains(oerr.Message, want) {
+				t.Errorf("error message %q lacks %q", oerr.Message, want)
+			}
+		}
+		// Nothing was published.
+		resp, body = c.do(http.MethodHead, c.url("/v2/"+e2eApp+"/blobs/"+d.String()), nil, nil)
+		c.expect(resp, body, http.StatusNotFound)
+		// The session and its spilled spool are gone, unlike after an
+		// internal failure (see pushInterrupted): the same bytes would only
+		// be refused again.
+		resp, body = c.do(http.MethodGet, uploadURL, nil, nil)
+		c.expectError(resp, body, http.StatusNotFound, oci.CodeBlobUploadUnknown)
+		if _, err := os.Stat(filepath.Join(e.uploadDir, uuid)); !errors.Is(err, fs.ErrNotExist) {
+			t.Errorf("spool of the refused session: stat = %v, want not exist", err)
+		}
+		// The monolithic form is refused the same way.
+		resp, body = c.do(http.MethodPost, c.url("/v2/"+e2eApp+"/blobs/uploads/?digest="+url.QueryEscape(d.String())), layer, map[string]string{"Content-Type": e2eOctetStream})
+		c.expectError(resp, body, http.StatusBadRequest, oci.CodeBlobUploadInvalid)
+		if entries, err := os.ReadDir(e.uploadDir); err != nil || len(entries) != 0 {
+			t.Errorf("uploads directory after the refusals: %v, %v; want empty", entries, err)
+		}
+		// Each refusal is one error-level record from the blob store,
+		// carrying what the fallback lines carry, and never a "request
+		// failed": the bytes are the client's problem, not a server fault.
+		recs := e.logs.records(t, "layer refused")
+		if len(recs) != 2 {
+			t.Fatalf("%d \"layer refused\" records, want 2", len(recs))
+		}
+		for _, rec := range recs {
+			if rec["level"] != "ERROR" || e2eStr(t, rec, "digest") != d.String() || e2eStr(t, rec, "format") != "gzip" ||
+				e2eStr(t, rec, "reason") != string(blob.ReasonNotReproducible) || e2eNum(t, rec, "size") != float64(len(layer)) {
+				t.Errorf("layer refused record = %v", rec)
+			}
+		}
+		if n := len(e.logs.records(t, "request failed")); n != 0 {
+			t.Errorf("%d \"request failed\" records for refusals, want none", n)
+		}
+		if n := len(e.logs.records(t, "blob stored")); n != 0 {
+			t.Errorf("%d \"blob stored\" records after refusals, want none", n)
+		}
+	})
+
+	t.Run("allowed", func(t *testing.T) {
+		e := newE2EEnvAllowRaw(t, true)
+		c := e.c
+		if got := c.pushPutBody(e2eApp, layer); got != d {
+			t.Fatalf("pushed %s, want %s", got, d)
+		}
+		rec := e.blobLog(d)
+		if e2eStr(t, rec, "kind") != string(blob.KindRaw) || e2eStr(t, rec, "raw_reason") != string(blob.ReasonNotReproducible) || e2eStr(t, rec, "format") != "gzip" {
+			t.Fatalf("blob stored record = %v, want raw/not-reproducible/gzip", rec)
+		}
+		c.getBlob(e2eApp, d, layer)
+		if n := len(e.logs.records(t, "layer refused")); n != 0 {
+			t.Errorf("%d \"layer refused\" records with AllowRaw, want none", n)
+		}
+	})
 }

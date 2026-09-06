@@ -99,7 +99,7 @@ func TestObserverRawStages(t *testing.T) {
 
 func TestObserverStagingDowngrade(t *testing.T) {
 	rec := &recorder{}
-	b, _, _ := newTestStore(t, Options{VerifyRoundTrip: true, Observer: rec})
+	b, _, _ := newTestStore(t, Options{VerifyRoundTrip: true, AllowRaw: true, Observer: rec})
 	full := tarBytes(t, "usr/lib/app", textBytes(8<<10, 3))
 	data := gzipBytes(t, full[:tarHeaderSize+1024], gzip.DefaultCompression)
 	meta := putPrism(t, b, data)

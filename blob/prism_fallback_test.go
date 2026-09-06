@@ -168,7 +168,7 @@ func TestPutRoundTripFailureStoresRaw(t *testing.T) {
 	}
 	t.Cleanup(func() { roundTripCheck = orig })
 
-	b, st, logs := newTestStore(t, Options{VerifyRoundTrip: true})
+	b, st, logs := newTestStore(t, Options{VerifyRoundTrip: true, AllowRaw: true})
 	data := gzipBytes(t, prismTar(t, prismFixtureFiles(t)), gzip.DefaultCompression)
 	meta := putPrism(t, b, data)
 	if meta.Kind != KindRaw || meta.RawReason != ReasonRoundTripFailed {
@@ -312,7 +312,7 @@ func TestPutContextCancelledDuringPrismFails(t *testing.T) {
 }
 
 func TestPutPrismAnalyzeTimeoutStoresRaw(t *testing.T) {
-	b, _, _ := newTestStore(t, Options{VerifyRoundTrip: true, AnalyzeTimeout: time.Nanosecond})
+	b, _, _ := newTestStore(t, Options{VerifyRoundTrip: true, AnalyzeTimeout: time.Nanosecond, AllowRaw: true})
 	data := gzipBytes(t, prismTar(t, prismFixtureFiles(t)), gzip.DefaultCompression)
 	meta := putPrism(t, b, data)
 	if meta.Kind != KindRaw || meta.RawReason != ReasonAnalyzeTimeout || meta.Format != "gzip" {
@@ -392,7 +392,7 @@ func TestPutTruncatedTarStoresRawDecomposeFailed(t *testing.T) {
 	}
 	data := gzipBytes(t, truncated, gzip.DefaultCompression)
 
-	b, _, logs := newTestStore(t, Options{VerifyRoundTrip: true})
+	b, _, logs := newTestStore(t, Options{VerifyRoundTrip: true, AllowRaw: true})
 	meta := putPrism(t, b, data)
 	if meta.Kind != KindRaw || meta.RawReason != ReasonDecomposeFailed {
 		t.Fatalf("kind/reason = %q/%q, want raw/%s", meta.Kind, meta.RawReason, ReasonDecomposeFailed)
@@ -421,7 +421,7 @@ func TestPutTruncatedTarStoresRawDecomposeFailed(t *testing.T) {
 // unlinked the moment it is created and could never appear there: it only
 // shows zrecipe cleaned up after itself.
 func TestPutNonReproducibleLeavesNoStagedObjects(t *testing.T) {
-	b, st, _ := newTestStore(t, Options{VerifyRoundTrip: true})
+	b, st, _ := newTestStore(t, Options{VerifyRoundTrip: true, AllowRaw: true})
 	content := textBytes(4096, 21)
 	tarData := tarBytes(t, "etc/motd", content)
 	data := twoLevelGzip(t, tarData[:len(tarData)/2], tarData[len(tarData)/2:])

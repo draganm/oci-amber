@@ -91,7 +91,7 @@ rejected.
 
 `import` shares `--store`, `--work-dir`, `--max-in-memory`,
 `--analyze-parallelism`, `--analyze-timeout`, `--max-concurrent-finalize`,
-`--verify-roundtrip` and `--log-level` with `serve`, and adds
+`--verify-roundtrip`, `--allow-raw` and `--log-level` with `serve`, and adds
 `--progress auto|tui|plain` (`auto` picks the TUI on a terminal),
 `--log-file path` and `--name`. It cannot run while `serve` has the store
 open. An interrupted import leaves the blobs it stored in place; running
@@ -251,9 +251,10 @@ variable in the last column; a flag on the command line wins.
 | `--listen` | `:5000` | listen address | `OCI_AMBER_LISTEN` |
 | `--max-in-memory` | `64MiB` | upload spool and zrecipe spool threshold before spilling to `--work-dir`; units `B`, `KiB`, `MiB`, `GiB`, `KB`, `MB`, `GB` | `OCI_AMBER_MAX_IN_MEMORY` |
 | `--analyze-parallelism` | `2` | zrecipe candidate workers per blob (each holds one engine working set) | `OCI_AMBER_ANALYZE_PARALLELISM` |
-| `--analyze-timeout` | `15m` | per-blob analyze deadline; on expiry the blob is stored raw | `OCI_AMBER_ANALYZE_TIMEOUT` |
+| `--analyze-timeout` | `15m` | per-blob analyze deadline; on expiry the blob cannot be a prism (see `--allow-raw`) | `OCI_AMBER_ANALYZE_TIMEOUT` |
 | `--max-concurrent-finalize` | `NumCPU/2` (min 1) | concurrent blob finalizations | `OCI_AMBER_MAX_CONCURRENT_FINALIZE` |
-| `--verify-roundtrip` | `true` | run the full pull pipeline over every prism before publishing it; a mismatch downgrades the blob to raw | `OCI_AMBER_VERIFY_ROUNDTRIP` |
+| `--verify-roundtrip` | `false` | diagnostic: also run the full pull pipeline over every prism before publishing it; a mismatch is a round-trip failure (refused, or stored raw with `--allow-raw`) | `OCI_AMBER_VERIFY_ROUNDTRIP` |
+| `--allow-raw` | `false` | store a layer raw when it cannot be stored as a prism (`not-reproducible`, `unsupported`, `corrupt`, `analyze-timeout`, `decompose-failed`, `roundtrip-failed`) instead of refusing the upload with `400 BLOB_UPLOAD_INVALID`; blobs that are not tars (configs, attestations, other artifacts) are always stored raw | `OCI_AMBER_ALLOW_RAW` |
 | `--upload-timeout` | `1h` | idle upload session expiry and recent-uploads table TTL | `OCI_AMBER_UPLOAD_TIMEOUT` |
 | `--gc-interval` | `0` | background GC cycle interval; `0` disables | `OCI_AMBER_GC_INTERVAL` |
 | `--log-level` | `info` | `debug`, `info`, `warn` or `error` | `OCI_AMBER_LOG_LEVEL` |
@@ -480,9 +481,12 @@ removes one.
 - The rootfs API is read-only, unauthenticated like the rest, lists no
   extended attributes (the tar carries them) and does not sniff content
   types.
-- A layer that zrecipe accepts but cannot rebuild is stored raw with
-  `raw_reason=roundtrip-failed`; bytes are never lost because the round-trip
-  check runs before publishing. zrecipe v0.1.0 did this for layers gzipped at
+- A layer zrecipe cannot rebuild is refused: the upload answers `400
+  BLOB_UPLOAD_INVALID` with a message naming the reason and `--allow-raw`,
+  and `import` fails with the same message. With `--allow-raw` such a layer
+  is stored raw with its reason instead (`raw_reason=roundtrip-failed` when
+  `--verify-roundtrip` caught it before publishing); bytes are never lost
+  either way. zrecipe v0.1.0 failed the round trip for layers gzipped at
   best-speed over content that barely compresses (the shape `crane append`
   produces); v0.2.0 fixed it and the crane smoke test now asserts such a
   layer becomes a prism. `docs/zrecipe-zlib-level0-roundtrip.md` records the

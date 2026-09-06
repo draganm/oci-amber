@@ -316,6 +316,8 @@ func TestHandleErrorMapping(t *testing.T) {
 		{upload.ErrUnknown, http.StatusNotFound, oci.CodeBlobUploadUnknown},
 		{oci.NewError(oci.CodeDigestInvalid, "bad"), http.StatusBadRequest, oci.CodeDigestInvalid},
 		{fmt.Errorf("wrapped: %w", oci.NewError(oci.CodeNameUnknown, "nope")), http.StatusNotFound, oci.CodeNameUnknown},
+		{&blob.RawRefusedError{Digest: oci.DigestOfBytes([]byte("layer")), Format: "gzip", Reason: blob.ReasonNotReproducible, Err: errors.New("zrecipe: not reproducible")}, http.StatusBadRequest, oci.CodeBlobUploadInvalid},
+		{fmt.Errorf("put: %w", &blob.RawRefusedError{Digest: oci.DigestOfBytes([]byte("layer")), Format: "gzip", Reason: blob.ReasonDecomposeFailed}), http.StatusBadRequest, oci.CodeBlobUploadInvalid},
 	}
 	for _, c := range cases {
 		rec := httptest.NewRecorder()
@@ -326,8 +328,22 @@ func TestHandleErrorMapping(t *testing.T) {
 		assertErrorCode(t, resp, c.status, c.code)
 	}
 
+	// A refusal's message is the store's own: it is what tells the client
+	// which layer was turned away, why, and about --allow-raw.
+	refused := &blob.RawRefusedError{Digest: oci.DigestOfBytes([]byte("layer")), Format: "gzip", Reason: blob.ReasonNotReproducible, Err: errors.New("zrecipe: not reproducible")}
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/v2/x/blobs/sha256:"+fakeHex, nil)
+	req := httptest.NewRequest(http.MethodPut, "/v2/x/blobs/uploads/abc?digest="+refused.Digest.String(), nil)
+	s.handleError(rec, req, refused)
+	var env oci.ErrorResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+		t.Fatalf("refusal body %q: %v", rec.Body.Bytes(), err)
+	}
+	if len(env.Errors) != 1 || env.Errors[0].Message != refused.Error() {
+		t.Fatalf("refusal errors = %+v, want one carrying %q", env.Errors, refused.Error())
+	}
+
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/v2/x/blobs/sha256:"+fakeHex, nil)
 	s.handleError(rec, req, errors.New("disk on fire"))
 	resp := &response{Response: rec.Result(), body: rec.Body.Bytes()}
 	resp.Request = req

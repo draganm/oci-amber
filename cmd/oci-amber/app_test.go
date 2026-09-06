@@ -63,7 +63,8 @@ func TestServeFlagDefaults(t *testing.T) {
 		AnalyzeParallelism:    2,
 		AnalyzeTimeout:        15 * time.Minute,
 		MaxConcurrentFinalize: max(1, runtime.NumCPU()/2),
-		VerifyRoundTrip:       true,
+		VerifyRoundTrip:       false,
+		AllowRaw:              false,
 		UploadTimeout:         time.Hour,
 		GCInterval:            0,
 		LogLevel:              slog.LevelInfo,
@@ -83,7 +84,8 @@ func TestServeFlagsExplicit(t *testing.T) {
 		"--analyze-parallelism", "4",
 		"--analyze-timeout", "1m",
 		"--max-concurrent-finalize", "3",
-		"--verify-roundtrip=false",
+		"--verify-roundtrip",
+		"--allow-raw",
 		"--upload-timeout", "30m",
 		"--gc-interval", "2h",
 		"--log-level", "debug",
@@ -99,7 +101,8 @@ func TestServeFlagsExplicit(t *testing.T) {
 		AnalyzeParallelism:    4,
 		AnalyzeTimeout:        time.Minute,
 		MaxConcurrentFinalize: 3,
-		VerifyRoundTrip:       false,
+		VerifyRoundTrip:       true,
+		AllowRaw:              true,
 		UploadTimeout:         30 * time.Minute,
 		GCInterval:            2 * time.Hour,
 		LogLevel:              slog.LevelDebug,
@@ -118,7 +121,8 @@ func TestServeFlagsFromEnv(t *testing.T) {
 	t.Setenv("OCI_AMBER_ANALYZE_PARALLELISM", "3")
 	t.Setenv("OCI_AMBER_ANALYZE_TIMEOUT", "2m")
 	t.Setenv("OCI_AMBER_MAX_CONCURRENT_FINALIZE", "5")
-	t.Setenv("OCI_AMBER_VERIFY_ROUNDTRIP", "false")
+	t.Setenv("OCI_AMBER_VERIFY_ROUNDTRIP", "true")
+	t.Setenv("OCI_AMBER_ALLOW_RAW", "true")
 	t.Setenv("OCI_AMBER_UPLOAD_TIMEOUT", "45m")
 	t.Setenv("OCI_AMBER_GC_INTERVAL", "30m")
 	t.Setenv("OCI_AMBER_LOG_LEVEL", "warn")
@@ -135,7 +139,8 @@ func TestServeFlagsFromEnv(t *testing.T) {
 		AnalyzeParallelism:    3,
 		AnalyzeTimeout:        2 * time.Minute,
 		MaxConcurrentFinalize: 5,
-		VerifyRoundTrip:       false,
+		VerifyRoundTrip:       true,
+		AllowRaw:              true,
 		UploadTimeout:         45 * time.Minute,
 		GCInterval:            30 * time.Minute,
 		LogLevel:              slog.LevelWarn,

@@ -62,13 +62,18 @@ func methodNotAllowed(w http.ResponseWriter, r *http.Request, allowed ...string)
 
 // handleError maps an error from the stores to a response: *oci.Error
 // carries its own code; the stores' not-found sentinels become the matching
-// 404 codes; anything else is an internal failure, logged and answered with
-// a 500 and an empty errors list.
+// 404 codes; a blob the store refuses to keep raw is the client's problem
+// and answers 400 with the store's message, which names --allow-raw;
+// anything else is an internal failure, logged and answered with a 500 and
+// an empty errors list.
 func (s *server) handleError(w http.ResponseWriter, r *http.Request, err error) {
 	var oerr *oci.Error
+	var refused *blob.RawRefusedError
 	switch {
 	case errors.As(err, &oerr):
 		writeError(w, oerr)
+	case errors.As(err, &refused):
+		writeError(w, oci.NewError(oci.CodeBlobUploadInvalid, "%v", err))
 	case errors.Is(err, blob.ErrNotFound):
 		writeError(w, oci.NewError(oci.CodeBlobUnknown, "blob unknown to registry"))
 	case errors.Is(err, image.ErrNotFound):

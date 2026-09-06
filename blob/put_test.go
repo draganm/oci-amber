@@ -320,7 +320,7 @@ func TestDeleteBlob(t *testing.T) {
 func putRawGzipCase(t *testing.T, name string, data []byte, reason RawReason) {
 	t.Helper()
 	t.Run(name, func(t *testing.T) {
-		b, _, logs := newTestStore(t, Options{})
+		b, _, logs := newTestStore(t, Options{AllowRaw: true})
 		d := oci.DigestOfBytes(data)
 		m, err := b.Put(context.Background(), spoolOf(data))
 		if err != nil {
@@ -357,7 +357,7 @@ func TestPutGzipFallbacks(t *testing.T) {
 }
 
 func TestPutAnalyzeTimeoutStoresRaw(t *testing.T) {
-	b, _, _ := newTestStore(t, Options{AnalyzeTimeout: time.Nanosecond})
+	b, _, _ := newTestStore(t, Options{AnalyzeTimeout: time.Nanosecond, AllowRaw: true})
 	data := gzipBytes(t, tarBytes(t, "etc/motd", textBytes(3000, 5)), gzip.DefaultCompression)
 	m, err := b.Put(context.Background(), spoolOf(data))
 	if err != nil {

@@ -28,6 +28,7 @@ import (
 type decision struct {
 	kind   Kind
 	reason RawReason       // set for KindRaw
+	err    error           // for KindRaw, the detail behind reason: zrecipe's error, if there is one
 	params *zrecipe.Params // set for KindPrism
 	format string          // "gzip" | "zstd" | "none", always set
 	staged *staged         // set for KindPrism: what the speculative decompose left
@@ -122,9 +123,14 @@ func (b *Store) analyze(ctx context.Context, sp *upload.Spool) (decision, error)
 	if f == zrecipe.FormatZstd {
 		windowSize, err := zstdWindowSize(r)
 		if err == nil && windowSize > maxZstdWindow {
-			b.log.Info("zstd window exceeds limit, storing raw",
+			b.log.Info("zstd window exceeds limit",
 				"window_size", windowSize, "limit", int64(maxZstdWindow))
-			return decision{kind: KindRaw, reason: ReasonUnsupported, format: format}, nil
+			return decision{
+				kind:   KindRaw,
+				reason: ReasonUnsupported,
+				err:    fmt.Errorf("zstd window %d exceeds the %d byte limit", windowSize, int64(maxZstdWindow)),
+				format: format,
+			}, nil
 		}
 		// A header that cannot be parsed decides nothing: Analyze runs and
 		// reports its own corrupt/unsupported classification.
@@ -193,13 +199,13 @@ func (b *Store) analyze(ctx context.Context, sp *upload.Spool) (decision, error)
 			return decision{}, fmt.Errorf("blob: analyze: %w", ctx.Err())
 		case errors.Is(err, context.DeadlineExceeded):
 			// Only the child deadline can have expired here.
-			return decision{kind: KindRaw, reason: ReasonAnalyzeTimeout, format: format}, nil
+			return decision{kind: KindRaw, reason: ReasonAnalyzeTimeout, err: err, format: format}, nil
 		case errors.Is(err, zrecipe.ErrNotReproducible):
-			return decision{kind: KindRaw, reason: ReasonNotReproducible, format: format}, nil
+			return decision{kind: KindRaw, reason: ReasonNotReproducible, err: err, format: format}, nil
 		case errors.Is(err, zrecipe.ErrUnsupported):
-			return decision{kind: KindRaw, reason: ReasonUnsupported, format: format}, nil
+			return decision{kind: KindRaw, reason: ReasonUnsupported, err: err, format: format}, nil
 		case errors.Is(err, zrecipe.ErrCorrupt):
-			return decision{kind: KindRaw, reason: ReasonCorrupt, format: format}, nil
+			return decision{kind: KindRaw, reason: ReasonCorrupt, err: err, format: format}, nil
 		default:
 			return decision{}, fmt.Errorf("blob: analyze: %w", err)
 		}

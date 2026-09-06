@@ -86,6 +86,11 @@ func TestAnalyzeClassifies(t *testing.T) {
 			if dec.kind != c.kind || dec.reason != c.reason || dec.format != c.format {
 				t.Fatalf("decision = {%s %q %s}, want {%s %q %s}", dec.kind, dec.reason, dec.format, c.kind, c.reason, c.format)
 			}
+			// A raw decision made from an Analyze failure carries that
+			// failure: it is the detail a refusal reports to the client.
+			if c.kind == KindRaw && c.reason != ReasonNotTar && dec.err == nil {
+				t.Fatalf("raw decision %s carries no error", c.reason)
+			}
 			if c.kind == KindPrism {
 				if dec.params == nil || string(dec.params.Format) != c.format {
 					t.Fatalf("prism decision needs params for %s: %+v", c.format, dec.params)
@@ -110,6 +115,9 @@ func TestAnalyzeTimeoutFallsBackToRaw(t *testing.T) {
 	}
 	if dec.kind != KindRaw || dec.reason != ReasonAnalyzeTimeout || dec.format != "gzip" {
 		t.Fatalf("decision = {%s %q %s}, want raw analyze-timeout gzip", dec.kind, dec.reason, dec.format)
+	}
+	if !errors.Is(dec.err, context.DeadlineExceeded) {
+		t.Fatalf("decision error = %v, want the deadline error", dec.err)
 	}
 }
 
