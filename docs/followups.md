@@ -198,6 +198,40 @@ Measured on an M4 Pro with real Docker Hub layers. For a 61 MiB go-flate layer (
 - Pass two overhead: a CPU profile of the former `ingestPrism` (now the pack commit) showed 1.9 s of wall time for under 0.5 s of hashing, chunking and zstd; the rest is one `WriteAt` syscall per object in amber-store-core's `appendLocked` and goroutine wakeups on the object channels and the append mutex among the GOMAXPROCS/2 writers. Batching appends belongs in amber-store-core; in this repo `emitBuffer` (8 objects, about 80 KiB with 10 KiB chunks) and `writers()` are worth tuning, and fewer writers may well be faster.
 - Search parallelism buys little: with 838 gzip candidates a non-reproducible 228 MiB layer costs 2.6 s at `--analyze-parallelism 1` and 1.35 s at 8, because the comparison aborts at the first divergent byte. Leave the default at 2.
 - Rootfs build: 1.2 s for 17.6k entries (0.4 s for 7.4k), mostly one `LookupKey` per regular file in `parseLayer`. Walking the prism's `blobs/` directory once in order, or parsing layers concurrently before applying them in order, would cut it.
+- Large layers, measured 2026-09-06 (M4 Pro, `blob.Store.Put` on one real
+  layer at a time, an Observer timing the stage transitions):
+
+  | layer | engine | analyze | confirm | commit |
+  |---|---|---|---|---|
+  | rust:1.94-bookworm 203 MiB (570 MiB tar, 10.7k entries) | go-flate 6 | 3.4 s | 8.9 s | 0.35 s |
+  | rust:1.94-bookworm 48 MiB (137 MiB tar) | pigz 9 | 9.4 s | 1.1 s | 0.12 s |
+  | dmilhdef/lhh:82 29.7 MiB (80 MiB tar) | zlib 9 | 2.8 s | 7.0 s | 0.07 s |
+
+  Chunk processing (ultracdc, blake3 keys, `Has`, zstd in `EncodeRecord`)
+  is already spread over GOMAXPROCS/2 encoders per pack writer and costs
+  well under a second of CPU per 200 MiB layer; the commit is what the
+  table shows. The confirm is the engine's floor: a bare `compress/flate`
+  level 6 pass over the same 570 MiB takes 8.3 s (68 MB/s), zlib level 9
+  through cgo about 11 MB/s of tar on that data, both single-threaded by
+  construction, so a lone large go-flate or zlib layer holds one core for
+  size ÷ engine speed whatever the pool does. Done since: the importer
+  feeds the largest absent blobs first (longest-processing-time-first),
+  and zrecipe hands survivors that all agree past 4 MiB to `Run`
+  (draganm/zrecipe#7, released as v0.5.2 and pinned here), which cut the pigz layer's analyze from 9.4 s to
+  3.3 s (its parallel and single-thread candidates agree over the whole
+  input, and the lockstep ran the single-thread one on one core). Whole
+  import of rust:1.94-bookworm: 20.0 s to 17.3 s, bounded by the two
+  203 and 178 MiB go-flate layers at 14 s each. Still open:
+  - the pigz winner is compressed twice, once by `Run` to complete it
+    and once by the confirming pass; settling on it unverified at the
+    bound needs the resume-on-confirm-failure escape hatch first;
+  - zrecipe's `search.Compare` reads the reference 240 bytes per `pread`
+    (one per flate flush, 784k on the 203 MiB layer); a 128 KiB
+    read-ahead saved 1.5 s of system time per such layer but moved wall
+    time not at all, so it was not kept;
+  - macOS pprof attributes far more CPU to `syscall.rawsyscalln` and
+    `pthread_cond_signal` than `time -l` shows as sys; trust wall and sys
+    time over the profile for syscalls on this machine.
 
 ### browse (2026-09-05)
 

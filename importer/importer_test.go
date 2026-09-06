@@ -3,6 +3,7 @@ package importer
 import (
 	"archive/tar"
 	"bytes"
+	"cmp"
 	"compress/gzip"
 	"context"
 	"encoding/json"
@@ -10,6 +11,7 @@ import (
 	"log/slog"
 	"math/rand"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -264,7 +266,8 @@ func TestRunCorruptBlobFailsBeforeWriting(t *testing.T) {
 func TestRunPutFailureCancelsTheRun(t *testing.T) {
 	arch, plan, e := fixture(t)
 	hookErr := errors.New("boom")
-	failDigest := plan.Blobs[0].Digest
+	// The largest blob is fed first, so failing it leaves the rest pending.
+	failDigest := slices.MaxFunc(plan.Blobs, func(a, b dockerarchive.PlanBlob) int { return cmp.Compare(a.Size, b.Size) }).Digest
 	putHook = func(ctx context.Context, pb dockerarchive.PlanBlob) error {
 		if pb.Digest == failDigest {
 			return hookErr
@@ -302,5 +305,60 @@ func TestRunPutFailureCancelsTheRun(t *testing.T) {
 	}
 	if _, err := e.images.Open("app", "latest"); !errors.Is(err, image.ErrNotFound) {
 		t.Fatalf("tag published after a failed run: %v", err)
+	}
+}
+
+// TestRunStoresLargestBlobsFirst pins the feeding order of the worker
+// pool: the largest absent blob goes first, so a big layer never starts
+// last and runs alone after the small ones have finished. A single worker
+// makes the start order the feeding order; the putHook seam records it.
+func TestRunStoresLargestBlobsFirst(t *testing.T) {
+	b := archivetest.New()
+	config := []byte(`{"architecture":"amd64","os":"linux","rootfs":{"type":"layers","diff_ids":[]}}`)
+	small := tarGz(t, "small", 2<<10, 3)
+	large := tarGz(t, "large", 256<<10, 4)
+	medium := tarGz(t, "medium", 32<<10, 5)
+	layers := []archivetest.Layer{{MediaType: gzipLayer, Data: small}, {MediaType: gzipLayer, Data: large}, {MediaType: gzipLayer, Data: medium}}
+	img := b.AddImage(config, layers, &oci.Platform{OS: "linux", Architecture: "amd64"}, nil)
+	b.Top(img)
+	b.Legacy(archivetest.LegacyEntry{Config: oci.DigestOfBytes(config), RepoTags: []string{"app:v1"}, Layers: []oci.Digest{oci.DigestOfBytes(small), oci.DigestOfBytes(large), oci.DigestOfBytes(medium)}})
+	path, err := b.WriteFile(t.TempDir(), "image.tar")
+	if err != nil {
+		t.Fatal(err)
+	}
+	arch, err := dockerarchive.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer arch.Close()
+	e := newEnv(t)
+	plan, err := arch.Plan(dockerarchive.PlanOptions{Present: e.blobs.Exists})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sizes := map[oci.Digest]int64{}
+	for _, pb := range plan.Blobs {
+		sizes[pb.Digest] = pb.Size
+	}
+	if slices.IsSortedFunc(plan.Blobs, func(a, b dockerarchive.PlanBlob) int { return cmp.Compare(b.Size, a.Size) }) {
+		t.Fatal("plan already lists the blobs largest first; the test would not tell the orders apart")
+	}
+
+	var started []oci.Digest
+	putHook = func(ctx context.Context, pb dockerarchive.PlanBlob) error {
+		started = append(started, pb.Digest)
+		return nil
+	}
+	t.Cleanup(func() { putHook = nil })
+	if _, err := New(e.blobs, e.images, arch, plan, e.tr, Options{Workers: 1}).Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(started) != len(plan.Blobs) {
+		t.Fatalf("started %d blobs, want %d", len(started), len(plan.Blobs))
+	}
+	for i := 1; i < len(started); i++ {
+		if sizes[started[i]] > sizes[started[i-1]] {
+			t.Fatalf("blob %d (%d bytes) started after blob %d (%d bytes); want largest first", i, sizes[started[i]], i-1, sizes[started[i-1]])
+		}
 	}
 }

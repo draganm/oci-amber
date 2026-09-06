@@ -1,6 +1,7 @@
 package importer
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"slices"
@@ -90,8 +91,12 @@ func (im *Importer) check(ctx context.Context) error {
 	return nil
 }
 
-// storeBlobs runs Put over the non-present blobs with a worker pool and
-// returns every blob's meta, present ones read from the store.
+// storeBlobs runs Put over the non-present blobs with a worker pool,
+// largest first, and returns every blob's meta, present ones read from
+// the store. A blob's time is dominated by a single-threaded recompression
+// proportional to its size, so feeding the largest first keeps a big
+// layer from starting last and running alone after the small ones are
+// done (longest-processing-time-first).
 func (im *Importer) storeBlobs(ctx context.Context) (map[oci.Digest]*blob.Meta, error) {
 	im.tr.StartBlobs()
 	ctx, cancel := context.WithCancel(ctx)
@@ -126,10 +131,7 @@ func (im *Importer) storeBlobs(ctx context.Context) (map[oci.Digest]*blob.Meta, 
 		}()
 	}
 feed:
-	for _, pb := range im.plan.Blobs {
-		if pb.Present {
-			continue
-		}
+	for _, pb := range im.absentLargestFirst() {
 		select {
 		case jobs <- pb:
 		case <-ctx.Done():
@@ -156,6 +158,20 @@ feed:
 		metas[pb.Digest] = &m
 	}
 	return metas, nil
+}
+
+// absentLargestFirst lists the plan's non-present blobs by decreasing
+// size, plan order among equals. The plan itself keeps its order, which
+// the tracker's rows follow.
+func (im *Importer) absentLargestFirst() []dockerarchive.PlanBlob {
+	var absent []dockerarchive.PlanBlob
+	for _, pb := range im.plan.Blobs {
+		if !pb.Present {
+			absent = append(absent, pb)
+		}
+	}
+	slices.SortStableFunc(absent, func(a, b dockerarchive.PlanBlob) int { return cmp.Compare(b.Size, a.Size) })
+	return absent
 }
 
 // putBlob stores one blob: it marks the digest in flight, then (absent a
