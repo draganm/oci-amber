@@ -194,6 +194,7 @@ func (b *Store) analyze(ctx context.Context, sp *upload.Spool) (decision, error)
 		TempDir:     b.spoolDir(),
 		MaxInMemory: b.opts.MaxInMemory,
 		Parallelism: b.opts.AnalyzeParallelism,
+		VerifyLimit: b.opts.VerifyLimit,
 	})
 	if err != nil {
 		switch {

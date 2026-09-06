@@ -44,6 +44,15 @@ type Options struct {
 	AnalyzeParallelism    int
 	AnalyzeTimeout        time.Duration
 	MaxConcurrentFinalize int
+	// VerifyLimit, when positive, is how many bytes of a layer's compressed
+	// form the ingest verifies: once the recompression has reproduced that
+	// much, the candidate is accepted and the rest of the layer is taken
+	// apart without being recompressed (zrecipe's Options.VerifyLimit,
+	// applied in the search and in the confirming pass). A layer whose
+	// compression diverges past the limit is stored as a prism and fails
+	// its digest check on pull instead of being caught at ingest. Zero
+	// verifies every byte.
+	VerifyLimit int64
 	// VerifyRoundTrip runs the full pull pipeline over every prism before
 	// it is published and treats a mismatch as a round-trip failure. It is
 	// a diagnostic; the CLI leaves it off.

@@ -182,6 +182,19 @@ Measured on an M4 Pro with real Docker Hub layers. For a 61 MiB go-flate layer (
     is what carries the elimination to their block size; deriving their
     verdict from an already-tested zlib or klauspost-flate candidate would
     let them be dropped without compressing a block.
+- Verify limit: **done** (2026-09-06, `--verify-limit`, default `150MiB`,
+  zrecipe v0.6.0 `Options.VerifyLimit`). The confirming pass and the
+  search's `Run` fallback (the pigz case, where agreeing survivors used to
+  run to the end) accept a candidate once it has reproduced that many
+  compressed bytes, so a 1.5 GiB go-flate layer no longer pays a minute of
+  single-threaded deflate to confirm what its first 150 MiB already showed;
+  the content still streams through the stager in full. The trade is
+  documented in the README: a compressor that diverges past the limit is
+  stored as a prism and fails the recompression's digest check on pull.
+  Not capped: the elimination itself, which feeds the survivor as far as
+  the window in which the last buffering pigz/pgzip candidate died (8 MiB
+  or 32 MiB of tar, depending on when their asynchronous first block
+  surfaces) plus a margin, small next to the limit.
 - Measured 2026-09-05 after the speculative decompose, `oci-amber import`
   of `dmilhdef/lhh:82` (arm64), fresh store each time: sha256:54a144adda00
   (26.9 MiB, gzip, go-flate) 3.95 s before, 3.62 s after; sha256:39a945af8df2

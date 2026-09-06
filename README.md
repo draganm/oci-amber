@@ -91,7 +91,8 @@ rejected.
 
 `import` shares `--store`, `--work-dir`, `--max-in-memory`,
 `--analyze-parallelism`, `--analyze-timeout`, `--max-concurrent-finalize`,
-`--verify-roundtrip`, `--allow-raw` and `--log-level` with `serve`, and adds
+`--verify-limit`, `--verify-roundtrip`, `--allow-raw` and `--log-level` with
+`serve`, and adds
 `--progress auto|tui|plain` (`auto` picks the TUI on a terminal),
 `--log-file path` and `--name`. It cannot run while `serve` has the store
 open. An interrupted import leaves the blobs it stored in place; running
@@ -253,6 +254,7 @@ variable in the last column; a flag on the command line wins.
 | `--analyze-parallelism` | `2` | zrecipe candidate workers per blob (each holds one engine working set) | `OCI_AMBER_ANALYZE_PARALLELISM` |
 | `--analyze-timeout` | `15m` | per-blob analyze deadline; on expiry the blob cannot be a prism (see `--allow-raw`) | `OCI_AMBER_ANALYZE_TIMEOUT` |
 | `--max-concurrent-finalize` | `NumCPU/2` (min 1) | concurrent blob finalizations | `OCI_AMBER_MAX_CONCURRENT_FINALIZE` |
+| `--verify-limit` | `150MiB` | how much of a layer's compressed form the ingest reproduces before accepting the recompression: once zrecipe has matched this many bytes, in its engine search and in the confirming pass, the rest of the layer is taken apart without being recompressed; `0` verifies every byte; same units as `--max-in-memory` | `OCI_AMBER_VERIFY_LIMIT` |
 | `--verify-roundtrip` | `false` | diagnostic: also run the full pull pipeline over every prism before publishing it; a mismatch is a round-trip failure (refused, or stored raw with `--allow-raw`) | `OCI_AMBER_VERIFY_ROUNDTRIP` |
 | `--allow-raw` | `false` | store a layer raw when it cannot be stored as a prism (`not-reproducible`, `unsupported`, `corrupt`, `analyze-timeout`, `decompose-failed`, `roundtrip-failed`) instead of refusing the upload with `400 BLOB_UPLOAD_INVALID`; blobs that are not tars (configs, attestations, other artifacts) are always stored raw | `OCI_AMBER_ALLOW_RAW` |
 | `--upload-timeout` | `1h` | idle upload session expiry and recent-uploads table TTL | `OCI_AMBER_UPLOAD_TIMEOUT` |
@@ -487,7 +489,15 @@ removes one.
   way in: the confirming pass recompresses the layer once through the pull
   path and compares it byte for byte with the upload, so a layer that would
   not rebuild is caught as `not-reproducible` before it is published, with
-  no second recompression. `--verify-roundtrip` (default off) additionally
+  no second recompression. That comparison stops at `--verify-limit`
+  (default 150 MiB of compressed bytes): a compressor that has reproduced
+  that much of a layer and diverges later is rare, and recompressing the
+  rest of a multi-GiB layer costs minutes of single-threaded deflate, so
+  past the limit the layer is taken apart without being recompressed. A
+  layer that does diverge past the limit is stored as a prism and fails
+  the recompression's digest check on pull, as an error rather than wrong
+  bytes; `--verify-limit 0` restores whole-layer verification.
+  `--verify-roundtrip` (default off) additionally
   replays the whole pull pipeline from the stored objects as a diagnostic.
   With `--allow-raw` such a layer is stored raw with its reason instead
   (`raw_reason=roundtrip-failed` when `--verify-roundtrip` caught it before

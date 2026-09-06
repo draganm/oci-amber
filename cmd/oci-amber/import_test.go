@@ -50,6 +50,7 @@ func TestImportFlagDefaults(t *testing.T) {
 		AnalyzeParallelism:    2,
 		AnalyzeTimeout:        15 * time.Minute,
 		MaxConcurrentFinalize: max(1, runtime.NumCPU()/2),
+		VerifyLimit:           150 << 20,
 		VerifyRoundTrip:       false,
 		AllowRaw:              false,
 		LogLevel:              slog.LevelInfo,
@@ -63,11 +64,11 @@ func TestImportFlagDefaults(t *testing.T) {
 
 func TestImportFlagsExplicit(t *testing.T) {
 	clearEnv(t)
-	cfg, err := runImportApp(t, "--store", "/s", "--name", "a:1", "--name", "b:2", "--progress", "plain", "--log-file", "/tmp/x.log", "--verify-roundtrip", "--allow-raw", "-")
+	cfg, err := runImportApp(t, "--store", "/s", "--name", "a:1", "--name", "b:2", "--progress", "plain", "--log-file", "/tmp/x.log", "--verify-limit", "0", "--verify-roundtrip", "--allow-raw", "-")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Archive != "-" || !reflect.DeepEqual(cfg.Names, []string{"a:1", "b:2"}) || cfg.Progress != "plain" || cfg.LogFile != "/tmp/x.log" || !cfg.VerifyRoundTrip || !cfg.AllowRaw {
+	if cfg.Archive != "-" || !reflect.DeepEqual(cfg.Names, []string{"a:1", "b:2"}) || cfg.Progress != "plain" || cfg.LogFile != "/tmp/x.log" || cfg.VerifyLimit != 0 || !cfg.VerifyRoundTrip || !cfg.AllowRaw {
 		t.Fatalf("cfg = %+v", cfg)
 	}
 }
@@ -101,10 +102,11 @@ func TestImportFlagsFromEnv(t *testing.T) {
 func TestImportRejectsBadValues(t *testing.T) {
 	clearEnv(t)
 	for _, args := range [][]string{
-		{"--store", "/s"},                                 // no archive
-		{"--store", "/s", "a.tar", "b.tar"},               // two archives
-		{"--store", "/s", "--progress", "fancy", "a.tar"}, // bad progress mode
-		{"--store", "/s", "--name", "not valid", "a.tar"}, // bad name
+		{"--store", "/s"},                                    // no archive
+		{"--store", "/s", "a.tar", "b.tar"},                  // two archives
+		{"--store", "/s", "--progress", "fancy", "a.tar"},    // bad progress mode
+		{"--store", "/s", "--verify-limit", "lots", "a.tar"}, // bad verify limit
+		{"--store", "/s", "--name", "not valid", "a.tar"},    // bad name
 		{"a.tar"}, // no store
 	} {
 		if _, err := runImportApp(t, args...); err == nil {
