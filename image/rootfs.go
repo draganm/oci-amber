@@ -14,6 +14,12 @@ import (
 	"github.com/draganm/oci-amber/store"
 )
 
+// rootfsHook is a test seam: when non-nil, buildRootfs calls it with the
+// repository and digest right before building a tree (never for a reused
+// or not-applicable one), so a test can hold a build in place. Nil in
+// production.
+var rootfsHook func(repo string, digest oci.Digest)
+
 // rootfsApplies reports whether m describes a container image whose layers
 // form a root filesystem: an image manifest with an OCI or Docker image
 // config. Indexes and artifacts do not.
@@ -43,6 +49,9 @@ func (s *Store) buildRootfs(ctx context.Context, w *store.Writer, repo string, d
 		return nil, key.Key{}, err
 	} else if ok {
 		return info, k, nil
+	}
+	if rootfsHook != nil {
+		rootfsHook(repo, digest)
 	}
 	start := time.Now()
 	b := rootfs.New()
@@ -88,7 +97,9 @@ func (s *Store) buildRootfs(ctx context.Context, w *store.Writer, repo string, d
 // tree (status ok or partial). The same digest has the same layers, so
 // nothing needs to be rebuilt on a re-push. An unavailable rootfs is not
 // reused: a layer stored raw at the time may have been deleted and pushed
-// again as a prism since.
+// again as a prism since. It runs before Put takes the repository lock;
+// should the root be deleted and collected before the re-push publishes,
+// the publish fails on the missing objects rather than naming them.
 func (s *Store) reuseRootfs(repo string, digest oci.Digest) (*Rootfs, key.Key, bool, error) {
 	name := ManifestRef(repo, digest)
 	root, err := s.st.Resolve(name)

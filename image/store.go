@@ -26,8 +26,9 @@ type Store struct {
 	st    *store.Store
 	blobs *blob.Store
 	log   *slog.Logger
-	// repos serializes Put and Delete per repository, so a delete's tag
-	// scan never interleaves with a publish in the same repository.
+	// repos serializes the publishing part of Put, and Delete, per
+	// repository, so a delete's tag scan never interleaves with a publish
+	// in the same repository. Put's rootfs build runs before taking it.
 	repos keyedmutex.Mutex[string]
 }
 
@@ -144,21 +145,6 @@ func (s *Store) Put(ctx context.Context, repo, reference, contentType string, bo
 		return nil, err
 	}
 
-	unlock := s.repos.Lock(repo)
-	defer unlock()
-
-	blobRoots, err := s.resolveBlobs(m)
-	if err != nil {
-		return nil, err
-	}
-	var childRoots map[oci.Digest]key.Key
-	if m.IsIndex() {
-		childRoots, err = s.resolveChildren(repo, m)
-		if err != nil {
-			return nil, err
-		}
-	}
-
 	meta := Meta{
 		Version:      metaVersion,
 		Kind:         KindManifest,
@@ -174,9 +160,15 @@ func (s *Store) Put(ctx context.Context, repo, reference, contentType string, bo
 		meta.Kind = KindIndex
 	}
 
-	// Pass one: the rootfs (image manifests only), then the manifest's own
-	// objects (manifest bytes, blobs/ and manifests/), all through the
-	// accounting writer.
+	// Blob resolution and the rootfs build (image manifests only) read
+	// nothing the repository lock guards, so they run before it: the
+	// platform manifests of one image pushed at once build their trees at
+	// the same time instead of queueing on the repository. The rootfs goes
+	// through the accounting writer that pass one continues with.
+	blobRoots, err := s.resolveBlobs(m)
+	if err != nil {
+		return nil, err
+	}
 	w := s.st.NewWriter(ctx)
 	defer w.Abort()
 	var rootfsKey key.Key
@@ -186,6 +178,20 @@ func (s *Store) Put(ctx context.Context, repo, reference, contentType string, bo
 			return nil, err
 		}
 	}
+
+	unlock := s.repos.Lock(repo)
+	defer unlock()
+
+	var childRoots map[oci.Digest]key.Key
+	if m.IsIndex() {
+		childRoots, err = s.resolveChildren(repo, m)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	// Pass one, continued: the manifest's own objects (manifest bytes,
+	// blobs/ and manifests/).
 	manifestKey, err := w.PutBytes(body)
 	if err != nil {
 		return nil, fmt.Errorf("image: storing manifest: %w", err)
