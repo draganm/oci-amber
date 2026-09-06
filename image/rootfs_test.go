@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -388,4 +389,58 @@ func rootfsEqual(a, b *Rootfs) bool {
 		return a == b
 	}
 	return a.Status == b.Status && a.Entries == b.Entries && a.Reason == b.Reason && a.SkippedCount == b.SkippedCount && slices.Equal(a.Skipped, b.Skipped)
+}
+
+// TestPutBuildsRootfsOutsideTheRepositoryLock pushes two platform
+// manifests into one repository at once and holds each build in the
+// rootfsHook seam until the other has arrived. Both arrive only when the
+// build runs before the repository lock; a build under the lock would
+// keep the second push waiting for the first to finish.
+func TestPutBuildsRootfsOutsideTheRepositoryLock(t *testing.T) {
+	e := newEnv(t)
+	layer := e.tarLayer(fsEntry{name: "etc/os-release", data: "ID=test\n"})
+	amd, _ := e.configBlob("amd64")
+	arm, _ := e.configBlob("arm64")
+	bodies := [][]byte{manifestBody(t, imageManifest(amd, layer)), manifestBody(t, imageManifest(arm, layer))}
+
+	arrived := make(chan struct{}, len(bodies))
+	release := make(chan struct{})
+	rootfsHook = func(string, oci.Digest) {
+		arrived <- struct{}{}
+		<-release
+	}
+	t.Cleanup(func() { rootfsHook = nil })
+
+	type result struct {
+		meta *Meta
+		err  error
+	}
+	results := make(chan result, len(bodies))
+	for _, body := range bodies {
+		go func() {
+			m, err := e.images.Put(context.Background(), "library/app", oci.DigestOfBytes(body).String(), oci.MediaTypeOCIManifest, body)
+			results <- result{m, err}
+		}()
+	}
+	both := true
+	for range bodies {
+		select {
+		case <-arrived:
+		case <-time.After(5 * time.Second):
+			both = false
+		}
+	}
+	close(release)
+	for range bodies {
+		r := <-results
+		if r.err != nil {
+			t.Fatal(r.err)
+		}
+		if r.meta.Rootfs == nil || r.meta.Rootfs.Status != RootfsOK {
+			t.Fatalf("Rootfs = %+v, want ok", r.meta.Rootfs)
+		}
+	}
+	if !both {
+		t.Fatal("the second rootfs build waited for the first push to finish: the build runs under the repository lock")
+	}
 }

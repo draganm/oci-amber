@@ -362,3 +362,177 @@ func TestRunStoresLargestBlobsFirst(t *testing.T) {
 		}
 	}
 }
+
+// multiArchFixture is an archive with two present platforms, each with one
+// prism layer of a different shape, an attestation for the first, and two
+// names in two repositories.
+func multiArchFixture(t *testing.T) (*dockerarchive.Archive, *dockerarchive.Plan, *env) {
+	t.Helper()
+	b := archivetest.New()
+	amdConfig := []byte(`{"architecture":"amd64","os":"linux","rootfs":{"type":"layers","diff_ids":[]}}`)
+	armConfig := []byte(`{"architecture":"arm64","os":"linux","rootfs":{"type":"layers","diff_ids":[]}}`)
+	amdLayer := tarGz(t, "usr/share/words", 64<<10, 6)
+	armLayer := tarGz(t, "opt/words", 64<<10, 7)
+	amd := b.AddImage(amdConfig, []archivetest.Layer{{MediaType: gzipLayer, Data: amdLayer}}, &oci.Platform{OS: "linux", Architecture: "amd64"}, nil)
+	arm := b.AddImage(armConfig, []archivetest.Layer{{MediaType: gzipLayer, Data: armLayer}}, &oci.Platform{OS: "linux", Architecture: "arm64"}, nil)
+	att := b.AddImage(archivetest.Attestation(amd))
+	idx := b.AddIndex([]oci.Descriptor{amd, arm, att}, nil)
+	b.Top(idx)
+	b.Legacy(archivetest.LegacyEntry{Config: oci.DigestOfBytes(amdConfig), RepoTags: []string{"registry.example.ch/team/app:v1", "app:latest"}, Layers: []oci.Digest{oci.DigestOfBytes(amdLayer)}})
+	path, err := b.WriteFile(t.TempDir(), "image.tar")
+	if err != nil {
+		t.Fatal(err)
+	}
+	arch, err := dockerarchive.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { arch.Close() })
+	e := newEnv(t)
+	plan, err := arch.Plan(dockerarchive.PlanOptions{Present: e.blobs.Exists})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return arch, plan, e
+}
+
+// platformsOf lists the plan's image manifests that describe a platform:
+// neither indexes nor attestations.
+func platformsOf(plan *dockerarchive.Plan) []oci.Digest {
+	var ds []oci.Digest
+	for _, pm := range plan.Manifests {
+		if !pm.IsIndex && !pm.Attestation {
+			ds = append(ds, pm.Digest)
+		}
+	}
+	return ds
+}
+
+// TestRunPublishesPlatformManifestsConcurrently holds each platform
+// manifest's first publish in the publishHook seam until the other has
+// arrived. Both arrive only when the manifests go through the worker
+// pool; publishing them one after another would hold the second until
+// the first, blocked in the seam, is done. Whatever order they finish
+// in, the report and the store come out the same as a sequential run's.
+func TestRunPublishesPlatformManifestsConcurrently(t *testing.T) {
+	arch, plan, e := multiArchFixture(t)
+	entry := plan.Entries[0]
+	platforms := platformsOf(plan)
+	if len(platforms) != 2 || entry.Platforms != 2 {
+		t.Fatalf("platforms = %v, entry = %+v", platforms, entry)
+	}
+	firstRepo := entry.Names[0].Repo
+
+	arrived := make(chan oci.Digest, 2)
+	release := make(chan struct{})
+	publishHook = func(ctx context.Context, repo string, pm dockerarchive.PlanManifest) error {
+		if repo == firstRepo && slices.Contains(platforms, pm.Digest) {
+			arrived <- pm.Digest
+			<-release
+		}
+		return nil
+	}
+	t.Cleanup(func() { publishHook = nil })
+
+	type result struct {
+		rep *Report
+		err error
+	}
+	done := make(chan result, 1)
+	go func() {
+		rep, err := New(e.blobs, e.images, arch, plan, e.tr, Options{Workers: 2}).Run(context.Background())
+		done <- result{rep, err}
+	}()
+	both := true
+	var seen []oci.Digest
+	for range platforms {
+		select {
+		case d := <-arrived:
+			seen = append(seen, d)
+		case <-time.After(5 * time.Second):
+			both = false
+		}
+	}
+	close(release)
+	r := <-done
+	if r.err != nil {
+		t.Fatal(r.err)
+	}
+	if !both {
+		t.Fatalf("only %v arrived while the other platform's publish was held: the manifests are published one after another", seen)
+	}
+
+	// The store holds everything, in every repository.
+	for _, n := range entry.Names {
+		im, err := e.images.Open(n.Repo, n.Tag)
+		if err != nil {
+			t.Fatalf("open %s: %v", n, err)
+		}
+		if im.Meta.Kind != image.KindIndex || im.Meta.Digest != entry.Digest {
+			t.Fatalf("%s: %+v", n, im.Meta)
+		}
+		for _, d := range entry.Manifests[:len(entry.Manifests)-1] {
+			if _, err := e.images.Open(n.Repo, d.String()); err != nil {
+				t.Fatalf("child %s in %s: %v", d, n.Repo, err)
+			}
+		}
+	}
+	// The report lists the platforms' rootfs outcomes in plan order.
+	er := r.rep.Entries[0]
+	if len(r.rep.Entries) != 1 || er.Platforms != 2 || er.Attestations != 1 || len(er.Rootfs) != 2 {
+		t.Fatalf("entry report = %+v", er)
+	}
+	for i, d := range platforms {
+		child, err := e.images.Open(firstRepo, d.String())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if child.Meta.Rootfs.Status != image.RootfsOK || er.Rootfs[i].Status != image.RootfsOK || er.Rootfs[i].Entries != child.Meta.Rootfs.Entries {
+			t.Fatalf("rootfs %d = %+v, stored %+v", i, er.Rootfs[i], child.Meta.Rootfs)
+		}
+	}
+	if er.Rootfs[0].Entries == er.Rootfs[1].Entries {
+		t.Fatalf("both platforms have %d entries; the fixture must tell them apart", er.Rootfs[0].Entries)
+	}
+	if er.Digest != entry.Digest || er.Stats.DiskBytes <= 0 {
+		t.Fatalf("entry report = %+v", er)
+	}
+	snap := e.tr.Snapshot()
+	for _, m := range snap.Manifests {
+		if m.State != ManifestDone {
+			t.Fatalf("manifest %s state = %v, want done", m.Digest, m.State)
+		}
+	}
+	if snap.Phase != PhaseDone || snap.Err != nil {
+		t.Fatalf("tracker: %+v", snap)
+	}
+}
+
+// TestRunPublishFailureCancelsTheRun forces one platform manifest's
+// publish to fail through the publishHook seam: the run returns that
+// error and no tag is published.
+func TestRunPublishFailureCancelsTheRun(t *testing.T) {
+	arch, plan, e := multiArchFixture(t)
+	platforms := platformsOf(plan)
+	hookErr := errors.New("boom")
+	publishHook = func(ctx context.Context, repo string, pm dockerarchive.PlanManifest) error {
+		if pm.Digest == platforms[1] {
+			return hookErr
+		}
+		return nil
+	}
+	t.Cleanup(func() { publishHook = nil })
+
+	_, err := New(e.blobs, e.images, arch, plan, e.tr, Options{Workers: 2}).Run(context.Background())
+	if !errors.Is(err, hookErr) {
+		t.Fatalf("err = %v, want it to wrap %v", err, hookErr)
+	}
+	for _, n := range plan.Entries[0].Names {
+		if _, err := e.images.Open(n.Repo, n.Tag); !errors.Is(err, image.ErrNotFound) {
+			t.Fatalf("tag %s published after a failed run: %v", n, err)
+		}
+	}
+	if s := e.tr.Snapshot(); s.Phase != PhaseDone || s.Err == nil {
+		t.Fatalf("tracker: %+v", s)
+	}
+}
