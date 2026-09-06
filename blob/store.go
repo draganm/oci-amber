@@ -348,7 +348,7 @@ func (b *Store) Put(ctx context.Context, sp *upload.Spool) (*Meta, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer dec.staged.drop()
+	defer dec.close()
 	meta := Meta{
 		Version:    MetaVersion,
 		Digest:     d,
@@ -360,8 +360,8 @@ func (b *Store) Put(ctx context.Context, sp *upload.Spool) (*Meta, error) {
 	var root key.Key
 	switch kind {
 	case KindPrism:
-		// Commit the staged pack, then the round-trip check.
-		res, stats, perr := b.finalizePrism(ctx, dec, d, size)
+		// The confirming pass and the commit, then the round-trip check.
+		res, params, stats, perr := b.finalizePrism(ctx, dec, d, size)
 		var fb *rawFallback
 		switch {
 		case perr == nil:
@@ -369,8 +369,8 @@ func (b *Store) Put(ctx context.Context, sp *upload.Spool) (*Meta, error) {
 			meta.DiffID = res.diffID
 			meta.UncompressedSize = res.uncompressedSize
 			meta.Entries = res.entries
-			meta.Engine = dec.params.Engine
-			meta.EngineVersion = dec.params.EngineVersion
+			meta.Engine = params.Engine
+			meta.EngineVersion = params.EngineVersion
 			meta.Stats = stats
 			root, err = b.writeRoot(ctx, meta, map[string]key.Key{
 				tarprism.RecipeFile: res.recipe,

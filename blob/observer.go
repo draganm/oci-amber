@@ -15,7 +15,8 @@ import (
 type Stage string
 
 const (
-	StageAnalyze Stage = "analyze" // zrecipe pass one, the engine search and the staging
+	StageAnalyze Stage = "analyze" // zrecipe pass one and the engine elimination
+	StageConfirm Stage = "confirm" // recompress the content once while the tar is taken apart
 	StageCommit  Stage = "commit"  // inserting the staged pack into the store
 	StageVerify  Stage = "verify"  // round-trip check
 	StageRaw     Stage = "raw"     // storing the bytes verbatim
@@ -71,6 +72,22 @@ func (b *Store) observeWriter(d oci.Digest, w io.Writer) io.Writer {
 	}
 	obs := b.opts.Observer
 	return &progressWriter{w: w, report: func(n int64) { obs.BlobProgress(d, n) }}
+}
+
+// observeConfirmWriter wraps w so the content handed to the stager during
+// the confirming pass is reported for d, scaled from the uncompressed size
+// down to the compressed size so the confirm bar ends at the size like the
+// other stages. Without an observer, or with an unknown uncompressed size,
+// w is returned as is.
+func (b *Store) observeConfirmWriter(d oci.Digest, w io.Writer, compressed, uncompressed int64) io.Writer {
+	if b.opts.Observer == nil || uncompressed <= 0 {
+		return w
+	}
+	obs := b.opts.Observer
+	scale := float64(compressed) / float64(uncompressed)
+	return &progressWriter{w: w, report: func(n int64) {
+		obs.BlobProgress(d, min(compressed, int64(float64(n)*scale)))
+	}}
 }
 
 // progressReader tracks the position of sequential reads over a seekable

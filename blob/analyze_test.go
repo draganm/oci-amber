@@ -6,6 +6,7 @@ import (
 	"compress/gzip"
 	"context"
 	"errors"
+	"io"
 	"slices"
 	"testing"
 	"time"
@@ -92,15 +93,28 @@ func TestAnalyzeClassifies(t *testing.T) {
 				t.Fatalf("raw decision %s carries no error", c.reason)
 			}
 			if c.kind == KindPrism {
-				if dec.params == nil || string(dec.params.Format) != c.format {
-					t.Fatalf("prism decision needs params for %s: %+v", c.format, dec.params)
+				if dec.analysis == nil {
+					t.Fatal("prism decision needs an analysis")
 				}
-				if c.engine && dec.params.Engine == "" {
+				if string(dec.analysis.Format()) != c.format {
+					t.Fatalf("analysis format = %q, want %q", dec.analysis.Format(), c.format)
+				}
+				// Confirm the analysis to reach the settled engine: a
+				// compressed prism must have found one.
+				params, cerr := dec.analysis.Confirm(ctx, io.Discard)
+				if cerr != nil {
+					t.Fatalf("confirm: %v", cerr)
+				}
+				if string(params.Format) != c.format {
+					t.Fatalf("confirmed format = %q, want %q", params.Format, c.format)
+				}
+				if c.engine && params.Engine == "" {
 					t.Fatal("compressed prism decision needs an engine")
 				}
-			} else if dec.params != nil {
-				t.Fatalf("raw decision must not carry params: %+v", dec.params)
+			} else if dec.analysis != nil {
+				t.Fatalf("raw decision must not carry an analysis")
 			}
+			dec.close()
 			assertSpoolDirEmpty(t, b)
 		})
 	}

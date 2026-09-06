@@ -8,7 +8,7 @@ require (
 	github.com/charmbracelet/lipgloss v1.1.0
 	github.com/charmbracelet/x/term v0.2.2
 	github.com/draganm/tar-prism v0.1.2-0.20260903193749-d658ce95e35f
-	github.com/draganm/zrecipe v0.4.0
+	github.com/draganm/zrecipe v0.5.0
 	github.com/jobs-build/amber-store-core v0.0.3
 	github.com/klauspost/compress v1.20.0
 	github.com/urfave/cli/v2 v2.27.7
