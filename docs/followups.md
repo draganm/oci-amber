@@ -146,13 +146,42 @@ Deferred from `docs/superpowers/specs/2026-09-04-rootfs-view-design.md`:
 
 Measured on an M4 Pro with real Docker Hub layers. For a 61 MiB go-flate layer (228 MiB of tar, 15k entries) the 11.2 s blob finalization was: pass one (stdlib inflate, spool, hashes) 0.8 s; search 3.6 s, all of it the one go-flate recompression that matches; pass two (klauspost inflate, hashes, chunking, store writes) 1.7 s; round-trip check 5.0 s, of which compose 1.5 s and recompress 3.5 s. Done since: the round-trip's compose and recompress overlap through a queued pipe (`blob/pipe.go`, 5.1 s to 3.8 s), and zrecipe's pigz engine compresses blocks on parallel workers (a pigz-compressed 28 MiB debian layer recompressed at 15 MB/s before). Deferred:
 
-- Recompress once, not twice. The search already proves the params reproduce the bytes; the round-trip could compose and compare BLAKE3 and size against pass one's `params.Uncompressed`, saving the 3.5 s second recompression (31% of that layer). The zlib level-0 incident (`docs/zrecipe-zlib-level0-roundtrip.md`) was caught by the recompressing round-trip, so this changes what the check guarantees; a middle ground confirms the winning candidate through `zrecipe.Recompress` over the spool (the pull code path) so the store-side check only composes and hashes.
+- Recompress once, not twice: **done** (2026-09-06, spec `docs/superpowers/specs/2026-09-06-single-pass-confirm-design.md`, zrecipe v0.5.0). zrecipe now finds the engine by eliminating candidates over a growing prefix (`search.Eliminate`) and confirms the survivor in a single pass (`Analysis.Confirm`) that recompresses the content through the same `Recompress` code the pull path runs, streaming the content to tar-prism as it goes. The blob store runs that as `analyze` (Start) plus a `confirm` stage that recompresses once while the tar is taken apart. The old round-trip check became `--verify-roundtrip`, default **off**: the confirming pass already verifies the recompression by construction (it runs the pull-path rebuild and compares byte for byte), so the round-trip only adds the store read-back and the tar-prism compose, kept as an opt-in diagnostic. The zlib level-0 class of mismatch (`docs/zrecipe-zlib-level0-roundtrip.md`) is now impossible by construction rather than caught after the fact.
+- Measured 2026-09-06 on `dmilhdef/lhh:82` (arm64, `oci-amber import --progress plain`, fresh store, best of two runs), before = main at v0.8.0 with its `--verify-roundtrip` default on, after = this change with its default (off):
+
+  | layer | before (verify on) | after (default) | after `--verify-roundtrip` |
+  |---|---|---|---|
+  | go-flate 28.2 MiB | 3.61 s | 2.85 s | 4.31 s |
+  | zlib 29.7 MiB | 14.55 s | 9.86 s | 16.82 s |
+  | total import (wall) | 14.8 s | 10.1 s | 17.1 s |
+  | 106 KiB layer | 62 ms | 596 ms | 598 ms |
+  | 433 KiB layer | 123 ms | 883 ms | 904 ms |
+
+  The default-to-default win (14.8 s to 10.1 s, 32% on the zlib layer) comes from dropping the second recompression, which the confirming pass makes safe to skip. The single-pass extract on its own (after `--verify-roundtrip` against before) is slightly slower on large layers, because the elimination now gives every candidate its first window, including those after the winner in tier order, and carries pigz/pgzip candidates to their block size; that overhead exceeds what overlapping the extract with the recompression saves, so keeping the round trip on is now a net loss and the diagnostic is off by default. Small layers regress about tenfold in relative terms (still sub-second) for the same reason: the winner's own recompression is tiny there, so the extra candidates dominate. Raising `--analyze-parallelism` to 8 cut the small layers to 225 ms and 348 ms with no change to the large ones; the default of 2, chosen when the old search stopped at the first tier match, is now a poor fit for the elimination.
 - Speculative decompose during pass one: done (spec
-  `2026-09-05-speculative-decompose-design.md`); the second inflate is
-  gone and chunking overlaps the search. Left open from it: skipping
-  chunks already in the store at staging time (needs the collector's
-  write barrier around the staging window), and the pack format making a
-  staged blob transferable to a remote store.
+  `2026-09-05-speculative-decompose-design.md`); superseded by the
+  single-pass confirm (2026-09-06), which moved the extract out of the
+  speculative position and into the confirming pass. Skipping chunks
+  already in the store at staging time is now **done** too
+  (`store.Pack` asks the store before encoding each record and accounts
+  the skipped ones at commit); the pack format making a staged blob
+  transferable to a remote store is still open.
+- New follow-ups from the single-pass confirm (2026-09-06):
+  - The elimination gives every candidate its first window, which regresses
+    small layers (see the table above). The escape hatch recorded in the
+    zrecipe spec is to stop at the first survivor in tier order and, should
+    the confirming pass fail, resume the search past it and extract again;
+    not built, since it trades the current simplicity for a rare path.
+  - The elimination is CPU-bound on the candidates' first windows, so it
+    parallelizes where the old search did not. `--analyze-parallelism`
+    should default higher than 2 now, or the elimination should take its
+    own worker count.
+  - Overlap the elimination with pass one: it needs only the first blocks
+    and could run while pass one is still inflating (a zrecipe follow-up).
+  - pigz and pgzip candidates buffer a whole block before they emit, which
+    is what carries the elimination to their block size; deriving their
+    verdict from an already-tested zlib or klauspost-flate candidate would
+    let them be dropped without compressing a block.
 - Measured 2026-09-05 after the speculative decompose, `oci-amber import`
   of `dmilhdef/lhh:82` (arm64), fresh store each time: sha256:54a144adda00
   (26.9 MiB, gzip, go-flate) 3.95 s before, 3.62 s after; sha256:39a945af8df2

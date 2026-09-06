@@ -483,9 +483,15 @@ removes one.
   types.
 - A layer zrecipe cannot rebuild is refused: the upload answers `400
   BLOB_UPLOAD_INVALID` with a message naming the reason and `--allow-raw`,
-  and `import` fails with the same message. With `--allow-raw` such a layer
-  is stored raw with its reason instead (`raw_reason=roundtrip-failed` when
-  `--verify-roundtrip` caught it before publishing); bytes are never lost
+  and `import` fails with the same message. Every prism is verified on the
+  way in: the confirming pass recompresses the layer once through the pull
+  path and compares it byte for byte with the upload, so a layer that would
+  not rebuild is caught as `not-reproducible` before it is published, with
+  no second recompression. `--verify-roundtrip` (default off) additionally
+  replays the whole pull pipeline from the stored objects as a diagnostic.
+  With `--allow-raw` such a layer is stored raw with its reason instead
+  (`raw_reason=roundtrip-failed` when `--verify-roundtrip` caught it before
+  publishing); bytes are never lost
   either way. zrecipe v0.1.0 failed the round trip for layers gzipped at
   best-speed over content that barely compresses (the shape `crane append`
   produces); v0.2.0 fixed it and the crane smoke test now asserts such a
