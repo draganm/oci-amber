@@ -290,13 +290,17 @@ finalize slots).
    alone after the small ones. The first failure cancels the run and is
    returned. A blob that `Put` downgrades
    to raw is not a failure.
-3. **Manifests.** Sequentially, children before parents, `images.Put` with
-   the body and media type. Child manifests are published by digest
-   (this is where the rootfs view is built). Each top-level entry is
-   published with its first name as the reference, which publishes both
-   the manifest ref and the tag; further names are published with one
-   more `Put` each. Entries with no name cannot occur (planning rejects
-   them).
+3. **Manifests.** `images.Put` with the body and media type. Image
+   manifests (this is where the rootfs view is built) go through the
+   same pool of `Workers` goroutines as the blobs, across every entry
+   and repository, so a multi-arch image's platforms build at once
+   (since 2026-09-07; before that every manifest was published in turn).
+   Indexes follow, one entry at a time in plan order, children before
+   parents. Child manifests are published by digest. Each top-level
+   entry is published with its first name as the reference, which
+   publishes both the manifest ref and the tag; further names are
+   published with one more `Put` each. Entries with no name cannot occur
+   (planning rejects them).
 4. **Report.** Built from the plan, the `blob.Meta` of every blob (from
    `Put`, or from `blobs.Open` for present ones) and the `image.Meta`
    returned by the first `Put` of each top-level entry.

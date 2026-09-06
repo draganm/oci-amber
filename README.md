@@ -96,7 +96,9 @@ rejected.
 `--progress auto|tui|plain` (`auto` picks the TUI on a terminal),
 `--log-file path` and `--name`. It cannot run while `serve` has the store
 open. An interrupted import leaves the blobs it stored in place; running
-it again skips them.
+it again skips them. The platform manifests of a multi-arch image are
+published, and their root filesystem views built, `--max-concurrent-finalize`
+at a time; the index follows once they are all stored.
 
 The report:
 
@@ -310,7 +312,9 @@ sparse file, a path escaping the root, a hard link without a target or a
 type tar cannot place is skipped. The push succeeds either way. Indexes and
 artifacts have no rootfs; re-pushing a manifest reuses the tree already
 stored under its digest (an unavailable one is tried again), and the same
-image in two repositories shares every rootfs object.
+image in two repositories shares every rootfs object. The tree is built
+before the push takes the repository lock, so the platform manifests of
+one image pushed at once are built in parallel.
 
 ## HTTP surface
 

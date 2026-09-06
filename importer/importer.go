@@ -21,8 +21,15 @@ import (
 // roundTripCheck lets tests force a failure. Nil in production.
 var putHook func(ctx context.Context, pb dockerarchive.PlanBlob) error
 
-// Options configure an Importer. Workers is how many blobs are finalized
-// at once; the command passes --max-concurrent-finalize.
+// publishHook is a test seam: when non-nil, the publish phase calls it
+// right before an image manifest's first Put into a repository and, on a
+// non-nil error, fails the run without calling image.Store.Put. Nil in
+// production.
+var publishHook func(ctx context.Context, repo string, pm dockerarchive.PlanManifest) error
+
+// Options configure an Importer. Workers is how many blobs are finalized,
+// and then how many image manifests are published, at once; the command
+// passes --max-concurrent-finalize.
 type Options struct {
 	Workers int
 }
@@ -99,51 +106,23 @@ func (im *Importer) check(ctx context.Context) error {
 // done (longest-processing-time-first).
 func (im *Importer) storeBlobs(ctx context.Context) (map[oci.Digest]*blob.Meta, error) {
 	im.tr.StartBlobs()
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-
 	var (
-		mu       sync.Mutex
-		metas    = map[oci.Digest]*blob.Meta{}
-		firstErr error
+		mu    sync.Mutex
+		metas = map[oci.Digest]*blob.Meta{}
 	)
-	jobs := make(chan dockerarchive.PlanBlob)
-	var wg sync.WaitGroup
-	for i := 0; i < im.opts.Workers; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for pb := range jobs {
-				meta, err := im.putBlob(ctx, pb)
-				mu.Lock()
-				if err != nil {
-					im.tr.Fail(pb.Digest, err)
-					if firstErr == nil {
-						firstErr = err
-						cancel()
-					}
-				} else {
-					im.tr.Done(pb.Digest, meta)
-					metas[pb.Digest] = meta
-				}
-				mu.Unlock()
-			}
-		}()
-	}
-feed:
-	for _, pb := range im.absentLargestFirst() {
-		select {
-		case jobs <- pb:
-		case <-ctx.Done():
-			break feed
+	err := each(ctx, im.opts.Workers, im.absentLargestFirst(), func(ctx context.Context, pb dockerarchive.PlanBlob) error {
+		meta, err := im.putBlob(ctx, pb)
+		if err != nil {
+			im.tr.Fail(pb.Digest, err)
+			return err
 		}
-	}
-	close(jobs)
-	wg.Wait()
-	if firstErr != nil {
-		return nil, firstErr
-	}
-	if err := ctx.Err(); err != nil {
+		im.tr.Done(pb.Digest, meta)
+		mu.Lock()
+		metas[pb.Digest] = meta
+		mu.Unlock()
+		return nil
+	})
+	if err != nil {
 		return nil, err
 	}
 	for _, pb := range im.plan.Blobs {
@@ -158,6 +137,52 @@ feed:
 		metas[pb.Digest] = &m
 	}
 	return metas, nil
+}
+
+// each calls fn for every item on up to workers goroutines, feeding the
+// items in order, and returns the first error. After a failure no more
+// items are fed and the calls still running see a cancelled context;
+// each waits for them before returning. With no failure it returns the
+// context's error, if any.
+func each[T any](ctx context.Context, workers int, items []T, fn func(context.Context, T) error) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	var (
+		mu       sync.Mutex
+		firstErr error
+	)
+	jobs := make(chan T)
+	var wg sync.WaitGroup
+	for range workers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for it := range jobs {
+				if err := fn(ctx, it); err != nil {
+					mu.Lock()
+					if firstErr == nil {
+						firstErr = err
+						cancel()
+					}
+					mu.Unlock()
+				}
+			}
+		}()
+	}
+feed:
+	for _, it := range items {
+		select {
+		case jobs <- it:
+		case <-ctx.Done():
+			break feed
+		}
+	}
+	close(jobs)
+	wg.Wait()
+	if firstErr != nil {
+		return firstErr
+	}
+	return ctx.Err()
 }
 
 // absentLargestFirst lists the plan's non-present blobs by decreasing
@@ -195,42 +220,94 @@ func (im *Importer) putBlob(ctx context.Context, pb dockerarchive.PlanBlob) (*bl
 	return meta, nil
 }
 
-// publish puts every manifest in every repository an entry is named in,
-// children first, then the entry under each of its tags, and builds the
-// report. The entry's first Put supplies its stats; the first repository's
-// Put of each platform manifest supplies its rootfs outcome.
+// publishJob is one manifest to publish in one repository under refs.
+type publishJob struct {
+	repo string
+	pm   dockerarchive.PlanManifest
+	refs []string
+}
+
+// published identifies a manifest's Put into a repository.
+type published struct {
+	repo   string
+	digest oci.Digest
+}
+
+// publish puts every manifest in every repository its entry is named in
+// and builds the report. Image manifests, whose Put builds the rootfs
+// view, go through the worker pool across all entries and repositories,
+// so the platforms of a multi-arch image are built at once; the indexes
+// follow one entry at a time in plan order, children before parents, as
+// an index resolves its children in its repository. The entry's first
+// Put supplies its stats; the first repository's Put of each platform
+// manifest supplies its rootfs outcome.
 func (im *Importer) publish(ctx context.Context, metas map[oci.Digest]*blob.Meta) (*Report, error) {
 	im.tr.StartManifests()
 	byDigest := map[oci.Digest]dockerarchive.PlanManifest{}
 	for _, pm := range im.plan.Manifests {
 		byDigest[pm.Digest] = pm
 	}
-	rep := &Report{Blobs: BlobCounts{RawReasons: map[blob.RawReason]int{}}}
+	var images, indexes []publishJob
 	for _, e := range im.plan.Entries {
-		er := EntryReport{Names: e.Names, Digest: e.Digest, IsIndex: e.IsIndex, Platforms: e.Platforms, Attestations: e.Attestations}
-		haveStats := false
-		for ri, repo := range reposOf(e.Names) {
+		for _, repo := range reposOf(e.Names) {
 			for _, d := range e.Manifests {
 				pm, ok := byDigest[d]
 				if !ok {
 					return nil, fmt.Errorf("importer: plan names manifest %s but does not carry it", d)
 				}
-				for i, ref := range refsFor(e, d, repo) {
-					im.tr.ManifestStart(d)
-					meta, err := im.images.Put(ctx, repo, ref, pm.MediaType, pm.Body)
-					if err != nil {
-						return nil, fmt.Errorf("importer: publishing %s/%s: %w", repo, ref, err)
-					}
-					im.tr.ManifestDone(d, meta)
-					if d == e.Digest && !haveStats {
-						er.Stats = meta.Stats
-						haveStats = true
-					}
-					if ri == 0 && i == 0 {
-						noteRootfs(&er, pm, meta)
-					}
+				j := publishJob{repo: repo, pm: pm, refs: refsFor(e, d, repo)}
+				if pm.IsIndex {
+					indexes = append(indexes, j)
+				} else {
+					images = append(images, j)
 				}
 			}
+		}
+	}
+
+	var (
+		mu    sync.Mutex
+		first = map[published]*image.Meta{}
+	)
+	err := each(ctx, im.opts.Workers, images, func(ctx context.Context, j publishJob) error {
+		if publishHook != nil {
+			if err := publishHook(ctx, j.repo, j.pm); err != nil {
+				return fmt.Errorf("importer: publishing %s/%s: %w", j.repo, j.refs[0], err)
+			}
+		}
+		meta, err := im.putManifest(ctx, j)
+		if err != nil {
+			return err
+		}
+		mu.Lock()
+		first[published{j.repo, j.pm.Digest}] = meta
+		mu.Unlock()
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	// The indexes were collected entry by entry, repository by repository,
+	// in plan order, which puts every child (image manifests above, nested
+	// indexes earlier in the list) before its parent.
+	for _, j := range indexes {
+		meta, err := im.putManifest(ctx, j)
+		if err != nil {
+			return nil, err
+		}
+		first[published{j.repo, j.pm.Digest}] = meta
+	}
+
+	rep := &Report{Blobs: BlobCounts{RawReasons: map[blob.RawReason]int{}}}
+	for _, e := range im.plan.Entries {
+		er := EntryReport{Names: e.Names, Digest: e.Digest, IsIndex: e.IsIndex, Platforms: e.Platforms, Attestations: e.Attestations}
+		repo := reposOf(e.Names)[0]
+		for _, d := range e.Manifests {
+			meta := first[published{repo, d}]
+			if d == e.Digest {
+				er.Stats = meta.Stats
+			}
+			noteRootfs(&er, byDigest[d], meta)
 		}
 		rep.Entries = append(rep.Entries, er)
 		rep.Added += er.Stats.DiskBytes
@@ -239,6 +316,24 @@ func (im *Importer) publish(ctx context.Context, metas map[oci.Digest]*blob.Meta
 	}
 	im.account(rep, metas)
 	return rep, nil
+}
+
+// putManifest publishes the job's manifest under each of its refs and
+// returns the first Put's meta.
+func (im *Importer) putManifest(ctx context.Context, j publishJob) (*image.Meta, error) {
+	var first *image.Meta
+	for _, ref := range j.refs {
+		im.tr.ManifestStart(j.pm.Digest)
+		meta, err := im.images.Put(ctx, j.repo, ref, j.pm.MediaType, j.pm.Body)
+		if err != nil {
+			return nil, fmt.Errorf("importer: publishing %s/%s: %w", j.repo, ref, err)
+		}
+		im.tr.ManifestDone(j.pm.Digest, meta)
+		if first == nil {
+			first = meta
+		}
+	}
+	return first, nil
 }
 
 // reposOf lists the distinct repositories among names, in first-use order.

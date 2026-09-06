@@ -125,7 +125,7 @@ Collected from the per-task and whole-branch reviews of the initial implementati
 
 Deferred from `docs/superpowers/specs/2026-09-04-rootfs-view-design.md`:
 
-- Move blob resolution and the rootfs build before the repository lock so concurrent pushes to one repository do not serialize on it.
+- Move blob resolution and the rootfs build before the repository lock so concurrent pushes to one repository do not serialize on it: **done** (2026-09-07). `image.Store.Put` resolves blobs and builds the tree first and takes the lock for child resolution and publication only; `oci-amber import` publishes an entry's image manifests through the blob worker pool (`--max-concurrent-finalize`) before its indexes, so a multi-arch image's platforms build at once.
 - A view for raw tar layers, storing their contents a second time.
 - Backfill command for existing stores (images already stored get a rootfs only when pushed again).
 - Metadata for the rootfs root directory itself (amber roots carry none).
