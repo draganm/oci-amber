@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/jobs-build/amber-store-core/amberpack"
@@ -337,5 +338,165 @@ func TestPackWriterEmitAfterCloseFails(t *testing.T) {
 	}
 	if st, err := w.Close(); err != nil || st != (Stats{}) {
 		t.Fatalf("Close = %+v, %v; want zero stats", st, err)
+	}
+}
+
+// putSmall writes b through w and returns its key. b must fit in one
+// chunk, so exactly one Blob object is offered (TestPutBytesSmallReturnsBlob)
+// and the tests below can count objects.
+func putSmall(t *testing.T, w *Writer, b []byte) key.Key {
+	t.Helper()
+	k, err := w.PutBytes(b)
+	if err != nil {
+		t.Fatalf("PutBytes: %v", err)
+	}
+	return k
+}
+
+func TestPackWriterSkipsPresentChunks(t *testing.T) {
+	// Two stores start out the same, holding A and B. One gets A, B and C
+	// through a pack Writer and AddPack, the other through a live Writer:
+	// the pack must carry C alone, and the commit's Stats must be the live
+	// Writer's to the byte.
+	ctx := context.Background()
+	a := pseudoRandomBytes(t, 4<<10, 51)
+	b := pseudoRandomBytes(t, 5<<10, 52)
+	c := pseudoRandomBytes(t, 6<<10, 53)
+
+	staged, live := openWriterStore(t), openWriterStore(t)
+	for _, s := range []*Store{staged, live} {
+		w := s.NewWriter(ctx)
+		putSmall(t, w, a)
+		putSmall(t, w, b)
+		pre, err := w.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if pre.ObjectsNew != 2 {
+			t.Fatalf("A and B made %d objects, want one Blob each", pre.ObjectsNew)
+		}
+	}
+
+	// The same three objects staged on an empty store set the size a pack
+	// has when nothing is skipped.
+	empty := openWriterStore(t)
+	fpw, err := empty.NewPackWriter(ctx, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	putSmall(t, fpw, a)
+	putSmall(t, fpw, b)
+	putSmall(t, fpw, c)
+	if _, err := fpw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	full := fpw.Pack()
+	defer full.Close()
+	if full.Skipped() != 0 {
+		t.Fatalf("Skipped() = %d on an empty store, want 0", full.Skipped())
+	}
+
+	pw, err := staged.NewPackWriter(ctx, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	putSmall(t, pw, a)
+	putSmall(t, pw, b)
+	kc := putSmall(t, pw, c)
+	pst, err := pw.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := pw.Pack()
+	defer p.Close()
+	if p.Skipped() != 2 {
+		t.Fatalf("Skipped() = %d, want 2 (A and B)", p.Skipped())
+	}
+	if p.Size() >= full.Size() {
+		t.Fatalf("pack with A and B skipped is %d bytes, not smaller than the all-absent pack's %d", p.Size(), full.Size())
+	}
+	if want := int64(len(a) + len(b) + len(c)); pst.LogicalBytes != want {
+		t.Errorf("pack writer LogicalBytes = %d, want %d (skipped objects included)", pst.LogicalBytes, want)
+	}
+
+	w := staged.NewWriter(ctx)
+	if err := w.AddPack(p, nil); err != nil {
+		t.Fatalf("AddPack: %v", err)
+	}
+	got, err := w.Close()
+	if err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	lw := live.NewWriter(ctx)
+	putSmall(t, lw, a)
+	putSmall(t, lw, b)
+	putSmall(t, lw, c)
+	want, err := lw.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != want {
+		t.Errorf("AddPack stats %+v differ from the live writer's %+v", got, want)
+	}
+	// And both say what happened: two duplicates, one new object.
+	if got.ObjectsDeduped != 2 || got.ObjectsNew != 1 || got.DedupedBytes != int64(len(a)+len(b)) ||
+		got.NewLogicalBytes != int64(len(c)) || got.LogicalBytes != pst.LogicalBytes || got.DiskBytes <= 0 {
+		t.Errorf("stats = %+v, want A and B deduped and C new", got)
+	}
+	if !bytes.Equal(readFileContent(t, staged, kc), c) {
+		t.Error("C read back differs")
+	}
+}
+
+func TestAddPackFailsWhenSkippedChunkVanished(t *testing.T) {
+	// A pack staged against a store that holds A carries A only as a
+	// skipped key. Committing it into a store that lacks A stands in for A
+	// being collected between staging and commit: the commit must fail
+	// naming A rather than account a chunk the store cannot serve.
+	ctx := context.Background()
+	a := pseudoRandomBytes(t, 4<<10, 61)
+	b := pseudoRandomBytes(t, 5<<10, 62)
+
+	s1 := openWriterStore(t)
+	w1 := s1.NewWriter(ctx)
+	ka := putSmall(t, w1, a)
+	if _, err := w1.Close(); err != nil {
+		t.Fatal(err)
+	}
+	pw, err := s1.NewPackWriter(ctx, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	putSmall(t, pw, a)
+	putSmall(t, pw, b)
+	if _, err := pw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	p := pw.Pack()
+	defer p.Close()
+	if p.Skipped() != 1 {
+		t.Fatalf("Skipped() = %d, want 1 (A)", p.Skipped())
+	}
+
+	s2 := openWriterStore(t)
+	w2 := s2.NewWriter(ctx)
+	// The skipped key is checked on the backend goroutine, so the failure
+	// surfaces from AddPack or, when its emits all fit the queue, from
+	// Close.
+	err = w2.AddPack(p, nil)
+	if err == nil {
+		_, err = w2.Close()
+	}
+	if err == nil {
+		t.Fatal("committing a pack whose skipped chunk is missing succeeded")
+	}
+	if msg := err.Error(); !strings.Contains(msg, "no longer in the store") || !strings.Contains(msg, ka.String()) {
+		t.Fatalf("err = %q, want it to say %s is no longer in the store", msg, ka)
+	}
+	if _, err := w2.Close(); err == nil {
+		t.Error("Close after the failed commit succeeded")
+	}
+	if has, _ := s2.Has(ka); has {
+		t.Error("the missing chunk appeared in the store")
 	}
 }
