@@ -37,16 +37,27 @@ var (
 const blobsDirName = "blobs"
 
 // Options configures a Store. Zero values take the defaults of the
-// corresponding `oci-amber serve` flags; VerifyRoundTrip must be set
-// explicitly (the CLI defaults it to true). WorkDir is required.
+// corresponding `oci-amber serve` flags. WorkDir is required.
 type Options struct {
 	WorkDir               string
 	MaxInMemory           int64
 	AnalyzeParallelism    int
 	AnalyzeTimeout        time.Duration
 	MaxConcurrentFinalize int
-	VerifyRoundTrip       bool
-	RecentTTL             time.Duration
+	// VerifyRoundTrip runs the full pull pipeline over every prism before
+	// it is published and treats a mismatch as a round-trip failure. It is
+	// a diagnostic; the CLI leaves it off.
+	VerifyRoundTrip bool
+	// AllowRaw lets Put store a blob raw whatever the reason. When false,
+	// Put refuses to store a blob raw for any reason other than
+	// ReasonNotTar and returns a *RawRefusedError instead: every other
+	// reason arises only for a blob that looked like a tar or a compressed
+	// tar, in practice a layer, and keeping such a layer verbatim is a
+	// choice the operator makes. Blobs that are not tars (configs,
+	// attestations, non-tar artifacts) can never be prisms and are stored
+	// raw regardless.
+	AllowRaw  bool
+	RecentTTL time.Duration
 	// Observer, when set, receives stage transitions and byte counts from
 	// Put. The registry leaves it nil; `oci-amber import` drives its
 	// progress display from it.
@@ -288,9 +299,11 @@ func (b *Store) buildRoot(w *store.Writer, meta Meta, files map[string]key.Key, 
 // commit or the raw ingest through the accounting writer, blob root,
 // oci/blob/<digest> ref, recent-uploads entry, log line, spool removal. A
 // prism whose staging or round-trip check fails is downgraded to raw with
-// the recorded reason. On any error nothing is published and the spool is
-// left in place so the caller can keep the session for a retry; on success
-// the spool's backing file is removed.
+// the recorded reason. Every raw outcome but not-tar needs Options.AllowRaw;
+// without it Put returns a *RawRefusedError (see refuseRaw). On any error
+// nothing is published and the spool is left in place so the caller can
+// decide what to do with the session; on success the spool's backing file
+// is removed.
 func (b *Store) Put(ctx context.Context, sp *upload.Spool) (*Meta, error) {
 	if sp == nil {
 		return nil, errors.New("blob: nil spool")
@@ -335,7 +348,7 @@ func (b *Store) Put(ctx context.Context, sp *upload.Spool) (*Meta, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer dec.staged.drop()
+	defer dec.close()
 	meta := Meta{
 		Version:    MetaVersion,
 		Digest:     d,
@@ -347,8 +360,8 @@ func (b *Store) Put(ctx context.Context, sp *upload.Spool) (*Meta, error) {
 	var root key.Key
 	switch kind {
 	case KindPrism:
-		// Commit the staged pack, then the round-trip check.
-		res, stats, perr := b.finalizePrism(ctx, dec, d, size)
+		// The confirming pass and the commit, then the round-trip check.
+		res, params, stats, perr := b.finalizePrism(ctx, dec, d, size)
 		var fb *rawFallback
 		switch {
 		case perr == nil:
@@ -356,8 +369,8 @@ func (b *Store) Put(ctx context.Context, sp *upload.Spool) (*Meta, error) {
 			meta.DiffID = res.diffID
 			meta.UncompressedSize = res.uncompressedSize
 			meta.Entries = res.entries
-			meta.Engine = dec.params.Engine
-			meta.EngineVersion = dec.params.EngineVersion
+			meta.Engine = params.Engine
+			meta.EngineVersion = params.EngineVersion
 			meta.Stats = stats
 			root, err = b.writeRoot(ctx, meta, map[string]key.Key{
 				tarprism.RecipeFile: res.recipe,
@@ -369,12 +382,19 @@ func (b *Store) Put(ctx context.Context, sp *upload.Spool) (*Meta, error) {
 			}
 		case errors.As(perr, &fb):
 			// Downgrade: the prism objects are left to GC and the verbatim
-			// bytes are stored below with the fallback reason.
+			// bytes are stored below with the fallback reason, unless the
+			// store refuses raw layers.
+			if err := b.refuseRaw(meta, fb.reason, fb.err); err != nil {
+				return nil, err
+			}
 			kind, reason = KindRaw, fb.reason
 		default:
 			return nil, perr
 		}
 	case KindRaw:
+		if err := b.refuseRaw(meta, reason, dec.err); err != nil {
+			return nil, err
+		}
 	default:
 		return nil, fmt.Errorf("blob: unknown kind %q", kind)
 	}

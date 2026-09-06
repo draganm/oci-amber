@@ -65,6 +65,7 @@ type config struct {
 	AnalyzeTimeout        time.Duration
 	MaxConcurrentFinalize int
 	VerifyRoundTrip       bool
+	AllowRaw              bool
 	UploadTimeout         time.Duration
 	GCInterval            time.Duration
 	LogLevel              slog.Level
@@ -215,9 +216,10 @@ func storeFlags() []cli.Flag {
 		&cli.StringFlag{Name: "work-dir", Usage: "`directory` holding <work-dir>/oci-amber/{uploads,spool}, whose contents are deleted at startup; nothing else under it is touched (default: <store>/work)", EnvVars: envVar("work-dir")},
 		&cli.StringFlag{Name: "max-in-memory", Value: defaultMaxInMemory, Usage: "upload spool and zrecipe spool threshold (`size` with unit B, KiB, MiB, GiB, KB, MB or GB)", EnvVars: envVar("max-in-memory")},
 		&cli.IntFlag{Name: "analyze-parallelism", Value: defaultAnalyzeParallelism, Usage: "zrecipe candidate `workers` per blob", EnvVars: envVar("analyze-parallelism")},
-		&cli.DurationFlag{Name: "analyze-timeout", Value: defaultAnalyzeTimeout, Usage: "per-blob analyze `deadline` before raw fallback", EnvVars: envVar("analyze-timeout")},
+		&cli.DurationFlag{Name: "analyze-timeout", Value: defaultAnalyzeTimeout, Usage: "per-blob analyze `deadline`; on expiry the blob cannot be a prism (see --allow-raw)", EnvVars: envVar("analyze-timeout")},
 		&cli.IntFlag{Name: "max-concurrent-finalize", Value: defaultMaxConcurrentFinalize(), Usage: "concurrent blob finalizations (`count`, default NumCPU/2, minimum 1)", EnvVars: envVar("max-concurrent-finalize")},
-		&cli.BoolFlag{Name: "verify-roundtrip", Value: true, Usage: "run the pull pipeline over every prism before publishing it", EnvVars: envVar("verify-roundtrip")},
+		&cli.BoolFlag{Name: "verify-roundtrip", Value: false, Usage: "diagnostic: also run the full pull pipeline over every prism before publishing it; a mismatch is a round-trip failure", EnvVars: envVar("verify-roundtrip")},
+		&cli.BoolFlag{Name: "allow-raw", Usage: "store a layer raw when it cannot be stored as a prism, instead of refusing the upload; blobs that are not tars are always stored raw", EnvVars: envVar("allow-raw")},
 		&cli.StringFlag{Name: "log-level", Value: defaultLogLevel, Usage: "log `level`: debug, info, warn or error", EnvVars: envVar("log-level")},
 	}
 }
@@ -242,6 +244,7 @@ func configFromCLI(c *cli.Context) (config, error) {
 		AnalyzeTimeout:        c.Duration("analyze-timeout"),
 		MaxConcurrentFinalize: c.Int("max-concurrent-finalize"),
 		VerifyRoundTrip:       c.Bool("verify-roundtrip"),
+		AllowRaw:              c.Bool("allow-raw"),
 		UploadTimeout:         c.Duration("upload-timeout"),
 		GCInterval:            c.Duration("gc-interval"),
 	}
@@ -326,6 +329,7 @@ func run(ctx context.Context, cfg config) error {
 		AnalyzeTimeout:        cfg.AnalyzeTimeout,
 		MaxConcurrentFinalize: cfg.MaxConcurrentFinalize,
 		VerifyRoundTrip:       cfg.VerifyRoundTrip,
+		AllowRaw:              cfg.AllowRaw,
 		RecentTTL:             cfg.UploadTimeout,
 	}, log)
 	if err != nil {
@@ -359,6 +363,7 @@ func run(ctx context.Context, cfg config) error {
 		"analyze_timeout", cfg.AnalyzeTimeout,
 		"max_concurrent_finalize", cfg.MaxConcurrentFinalize,
 		"verify_roundtrip", cfg.VerifyRoundTrip,
+		"allow_raw", cfg.AllowRaw,
 		"upload_timeout", cfg.UploadTimeout,
 		"gc_interval", cfg.GCInterval,
 	)

@@ -50,7 +50,8 @@ func TestImportFlagDefaults(t *testing.T) {
 		AnalyzeParallelism:    2,
 		AnalyzeTimeout:        15 * time.Minute,
 		MaxConcurrentFinalize: max(1, runtime.NumCPU()/2),
-		VerifyRoundTrip:       true,
+		VerifyRoundTrip:       false,
+		AllowRaw:              false,
 		LogLevel:              slog.LevelInfo,
 		Archive:               "image.tar",
 		Progress:              "auto",
@@ -62,11 +63,11 @@ func TestImportFlagDefaults(t *testing.T) {
 
 func TestImportFlagsExplicit(t *testing.T) {
 	clearEnv(t)
-	cfg, err := runImportApp(t, "--store", "/s", "--name", "a:1", "--name", "b:2", "--progress", "plain", "--log-file", "/tmp/x.log", "--verify-roundtrip=false", "-")
+	cfg, err := runImportApp(t, "--store", "/s", "--name", "a:1", "--name", "b:2", "--progress", "plain", "--log-file", "/tmp/x.log", "--verify-roundtrip", "--allow-raw", "-")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Archive != "-" || !reflect.DeepEqual(cfg.Names, []string{"a:1", "b:2"}) || cfg.Progress != "plain" || cfg.LogFile != "/tmp/x.log" || cfg.VerifyRoundTrip {
+	if cfg.Archive != "-" || !reflect.DeepEqual(cfg.Names, []string{"a:1", "b:2"}) || cfg.Progress != "plain" || cfg.LogFile != "/tmp/x.log" || !cfg.VerifyRoundTrip || !cfg.AllowRaw {
 		t.Fatalf("cfg = %+v", cfg)
 	}
 }
@@ -76,12 +77,14 @@ func TestImportFlagsFromEnv(t *testing.T) {
 	t.Setenv("OCI_AMBER_STORE", "/srv/env-store")
 	t.Setenv("OCI_AMBER_PROGRESS", "plain")
 	t.Setenv("OCI_AMBER_LOG_FILE", "/tmp/env.log")
+	t.Setenv("OCI_AMBER_VERIFY_ROUNDTRIP", "true")
+	t.Setenv("OCI_AMBER_ALLOW_RAW", "true")
 
 	cfg, err := runImportApp(t, "image.tar")
 	if err != nil {
 		t.Fatalf("import from env: %v", err)
 	}
-	if cfg.Store != "/srv/env-store" || cfg.Progress != "plain" || cfg.LogFile != "/tmp/env.log" {
+	if cfg.Store != "/srv/env-store" || cfg.Progress != "plain" || cfg.LogFile != "/tmp/env.log" || !cfg.VerifyRoundTrip || !cfg.AllowRaw {
 		t.Fatalf("env flags: got %+v", cfg)
 	}
 

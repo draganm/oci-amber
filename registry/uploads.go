@@ -236,7 +236,8 @@ func (s *server) putUpload(w http.ResponseWriter, r *http.Request, name, id stri
 // whose session id the client never learns, so it is discarded on every
 // failure; a PUT's session survives internal failures so the client can
 // retry the PUT. A digest mismatch discards the session either way: its
-// bytes can never become valid.
+// bytes can never become valid. So does the store refusing to keep the
+// blob raw: the same bytes would be refused again.
 func (s *server) finalize(w http.ResponseWriter, r *http.Request, name string, sess *upload.Session, want oci.Digest, monolithic bool) {
 	sp, err := sess.Spool()
 	if err != nil {
@@ -256,7 +257,8 @@ func (s *server) finalize(w http.ResponseWriter, r *http.Request, name string, s
 	}
 	meta, err := s.blobs.Put(r.Context(), sp)
 	if err != nil {
-		if monolithic {
+		var refused *blob.RawRefusedError
+		if monolithic || errors.As(err, &refused) {
 			s.discardSession(sess.ID)
 			s.removeSpool(sp, sess.ID)
 		}

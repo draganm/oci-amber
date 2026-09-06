@@ -26,11 +26,24 @@ import (
 
 // decision is the outcome of pass one: how the blob will be stored.
 type decision struct {
-	kind   Kind
-	reason RawReason       // set for KindRaw
-	params *zrecipe.Params // set for KindPrism
-	format string          // "gzip" | "zstd" | "none", always set
-	staged *staged         // set for KindPrism: what the speculative decompose left
+	kind     Kind
+	reason   RawReason         // set for KindRaw
+	err      error             // for KindRaw, the detail behind reason: zrecipe's error, if there is one
+	analysis *zrecipe.Analysis // set for KindPrism: the decompressed content and the settled candidate, awaiting the confirming pass
+	src      io.Closer         // set for KindPrism: the open upload spool the confirming pass reads back for its byte comparison
+	format   string            // "gzip" | "zstd" | "none", always set
+}
+
+// close releases a prism decision's analysis (the zrecipe spool) and the
+// upload reader it compares against. Safe on a raw decision and more than
+// once.
+func (d decision) close() {
+	if d.analysis != nil {
+		d.analysis.Close()
+	}
+	if d.src != nil {
+		d.src.Close()
+	}
 }
 
 // staged is what the speculative decompose left behind (spec "Blob
@@ -101,9 +114,16 @@ func (b *Store) analyze(ctx context.Context, sp *upload.Spool) (decision, error)
 	if err != nil {
 		return decision{}, fmt.Errorf("blob: opening spool: %w", err)
 	}
-	if c, ok := r.(io.Closer); ok {
-		defer c.Close()
-	}
+	// The confirming pass reads this reader back for its byte comparison,
+	// so a prism decision keeps it open and closes it through decision.close;
+	// every other return closes it here. srcCloser is nil'd once the prism
+	// decision has taken ownership.
+	srcCloser, _ := r.(io.Closer)
+	defer func() {
+		if srcCloser != nil {
+			srcCloser.Close()
+		}
+	}()
 	r = b.observeReader(sp.Digest(), r)
 
 	// Detect first so a raw fallback still records the container format.
@@ -122,9 +142,14 @@ func (b *Store) analyze(ctx context.Context, sp *upload.Spool) (decision, error)
 	if f == zrecipe.FormatZstd {
 		windowSize, err := zstdWindowSize(r)
 		if err == nil && windowSize > maxZstdWindow {
-			b.log.Info("zstd window exceeds limit, storing raw",
+			b.log.Info("zstd window exceeds limit",
 				"window_size", windowSize, "limit", int64(maxZstdWindow))
-			return decision{kind: KindRaw, reason: ReasonUnsupported, format: format}, nil
+			return decision{
+				kind:   KindRaw,
+				reason: ReasonUnsupported,
+				err:    fmt.Errorf("zstd window %d exceeds the %d byte limit", windowSize, int64(maxZstdWindow)),
+				format: format,
+			}, nil
 		}
 		// A header that cannot be parsed decides nothing: Analyze runs and
 		// reports its own corrupt/unsupported classification.
@@ -158,66 +183,46 @@ func (b *Store) analyze(ctx context.Context, sp *upload.Spool) (decision, error)
 		}
 	}
 
-	// Every remaining stream is a tar candidate. Its decompressed form is
-	// taken apart and staged in a pack while Analyze inflates and searches
-	// it (spec "Speculative decompose"): the pack is inserted into the
-	// store only once params are known and dropped on every other outcome.
-	pw, err := b.st.NewPackWriter(ctx, b.spoolDir())
-	if err != nil {
-		return decision{}, fmt.Errorf("blob: %w", err)
-	}
-	p := newPipe(stagePipeSlots)
-	done := make(chan *staged, 1)
-	go func() { done <- b.stage(ctx, p, pw) }()
-
+	// Every remaining stream is a tar candidate. Find its compression by
+	// decompressing once and eliminating the candidates, under the analyze
+	// deadline (spec "Single-pass confirm"). Nothing is staged here: the
+	// confirming pass in finalizePrism takes the tar apart while it
+	// recompresses the content, so the layer is read and recompressed once.
 	actx, cancel := context.WithTimeout(ctx, b.opts.AnalyzeTimeout)
 	defer cancel()
-	params, err := zrecipe.Analyze(actx, r, &zrecipe.Options{
-		TempDir:      b.spoolDir(),
-		MaxInMemory:  b.opts.MaxInMemory,
-		Parallelism:  b.opts.AnalyzeParallelism,
-		Uncompressed: p,
+	a, err := zrecipe.Start(actx, r, &zrecipe.Options{
+		TempDir:     b.spoolDir(),
+		MaxInMemory: b.opts.MaxInMemory,
+		Parallelism: b.opts.AnalyzeParallelism,
 	})
-	// Analyze has written everything it will: end the stream for the
-	// stager (its error, so a failed Analyze makes the stager's next read
-	// fail instead of reporting a clean end) and collect the stager.
-	p.CloseWrite(err)
-	s := <-done
 	if err != nil {
-		s.drop()
-		if s.err != nil {
-			b.log.Debug("staging discarded", "digest", sp.Digest(), "error", s.err)
-		}
 		switch {
 		case ctx.Err() != nil:
 			return decision{}, fmt.Errorf("blob: analyze: %w", ctx.Err())
 		case errors.Is(err, context.DeadlineExceeded):
 			// Only the child deadline can have expired here.
-			return decision{kind: KindRaw, reason: ReasonAnalyzeTimeout, format: format}, nil
+			return decision{kind: KindRaw, reason: ReasonAnalyzeTimeout, err: err, format: format}, nil
 		case errors.Is(err, zrecipe.ErrNotReproducible):
-			return decision{kind: KindRaw, reason: ReasonNotReproducible, format: format}, nil
+			return decision{kind: KindRaw, reason: ReasonNotReproducible, err: err, format: format}, nil
 		case errors.Is(err, zrecipe.ErrUnsupported):
-			return decision{kind: KindRaw, reason: ReasonUnsupported, format: format}, nil
+			return decision{kind: KindRaw, reason: ReasonUnsupported, err: err, format: format}, nil
 		case errors.Is(err, zrecipe.ErrCorrupt):
-			return decision{kind: KindRaw, reason: ReasonCorrupt, format: format}, nil
+			return decision{kind: KindRaw, reason: ReasonCorrupt, err: err, format: format}, nil
 		default:
 			return decision{}, fmt.Errorf("blob: analyze: %w", err)
 		}
 	}
-	// Analyze does not observe ctx on uncompressed input.
-	if err := ctx.Err(); err != nil {
-		s.drop()
-		return decision{}, fmt.Errorf("blob: analyze: %w", err)
-	}
-	return decision{kind: KindPrism, params: params, format: string(params.Format), staged: s}, nil
+	dec := decision{kind: KindPrism, analysis: a, src: srcCloser, format: format}
+	srcCloser = nil // ownership passes to dec.close
+	return dec, nil
 }
 
-// stage runs the speculative decompose on its own goroutine: it reads the
-// decompressed stream from p, hashes it with BLAKE3 and sha256, takes the
-// tar apart with the amber sink over the pack writer w and returns what
-// it left behind. It always reads p to its end, so Analyze, which writes
-// p, is never blocked or failed by the stager; after a failure the rest
-// of the stream is discarded and the pack writer aborted.
+// stage takes the decompressed tar apart on its own goroutine: it reads
+// the stream from p, hashes it with BLAKE3 and sha256, splits it with the
+// amber sink over the pack writer w and returns what it left behind. It
+// always reads p to its end, so the confirming pass, which writes p, is
+// never blocked or failed by the stager; after a failure the rest of the
+// stream is discarded and the pack writer aborted.
 func (b *Store) stage(ctx context.Context, p *pipe, w *store.Writer) *staged {
 	s := &staged{}
 	b3 := blake3.New(32, nil)

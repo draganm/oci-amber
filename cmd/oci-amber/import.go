@@ -41,6 +41,7 @@ type importConfig struct {
 	AnalyzeTimeout        time.Duration
 	MaxConcurrentFinalize int
 	VerifyRoundTrip       bool
+	AllowRaw              bool
 	LogLevel              slog.Level
 	LogFile               string
 	Archive               string   // path, or "-" for stdin
@@ -69,6 +70,7 @@ func importConfigFromCLI(c *cli.Context) (importConfig, error) {
 		AnalyzeTimeout:        c.Duration("analyze-timeout"),
 		MaxConcurrentFinalize: c.Int("max-concurrent-finalize"),
 		VerifyRoundTrip:       c.Bool("verify-roundtrip"),
+		AllowRaw:              c.Bool("allow-raw"),
 		LogFile:               c.String("log-file"),
 		Archive:               c.Args().First(),
 		Names:                 c.StringSlice("name"),
@@ -208,6 +210,7 @@ func runImport(ctx context.Context, cfg importConfig) error {
 		AnalyzeTimeout:        cfg.AnalyzeTimeout,
 		MaxConcurrentFinalize: cfg.MaxConcurrentFinalize,
 		VerifyRoundTrip:       cfg.VerifyRoundTrip,
+		AllowRaw:              cfg.AllowRaw,
 		RecentTTL:             importRecentTTL,
 		Observer:              tr,
 	}, log)

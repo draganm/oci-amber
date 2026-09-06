@@ -289,31 +289,75 @@ func classifyDecomposeError(ctx context.Context, err error) error {
 	return &decomposeError{err}
 }
 
-// finalizePrism commits a staged prism (spec "Blob orchestration"): the
-// staging outcome is judged first, then the pack and comp.json go into the
-// store through one accounting writer, then, when VerifyRoundTrip is set,
-// the pull pipeline runs over the fresh objects. It returns a *rawFallback
-// when the spec stores the blob raw instead (decompose-failed,
-// roundtrip-failed; both logged at error level), the context's error when
-// the request went away, and any other error when the upload must fail.
-// Objects written before a failure are left to GC; the pack is released
-// on every path.
-func (b *Store) finalizePrism(ctx context.Context, dec decision, d oci.Digest, size int64) (prismResult, store.Stats, error) {
-	s, params := dec.staged, dec.params
-	if s == nil || params == nil {
-		return prismResult{}, store.Stats{}, errors.New("blob: prism decision without params or a staged pack")
+// finalizePrism runs the confirming pass and commits (spec "Single-pass
+// confirm"): the stager takes the tar apart while Confirm recompresses the
+// content from the same stream, then the staged pack and comp.json go into
+// the store through one accounting writer, then, when VerifyRoundTrip is
+// set, the pull pipeline runs over the fresh objects. It returns the
+// confirmed params on success, a *rawFallback when the blob cannot be kept
+// as a prism (not-reproducible on confirm, decompose-failed,
+// roundtrip-failed), the context's error when the request went away, and
+// any other error when the upload must fail. Put decides what a fallback
+// becomes: the "storing raw" lines are logged here at error level only
+// when AllowRaw makes that the outcome, since a refusal gets its own line
+// from refuseRaw. Objects written before a failure are left to GC; the
+// pack is released on every path.
+func (b *Store) finalizePrism(ctx context.Context, dec decision, d oci.Digest, size int64) (prismResult, *zrecipe.Params, store.Stats, error) {
+	a := dec.analysis
+	if a == nil {
+		return prismResult{}, nil, store.Stats{}, errors.New("blob: prism decision without an analysis")
+	}
+
+	// Confirming pass: the stager takes the tar apart from the decompressed
+	// stream while Confirm recompresses that same stream and compares it
+	// with the upload. The pack file is created before Confirm runs; a
+	// failure to create it fails the upload outright, even for a blob that
+	// might have ended up raw, as the spec's fail-fast on an unwritable
+	// spool directory prescribes.
+	b.observeStage(d, StageConfirm)
+	pw, err := b.st.NewPackWriter(ctx, b.spoolDir())
+	if err != nil {
+		return prismResult{}, nil, store.Stats{}, fmt.Errorf("blob: %w", err)
+	}
+	p := newPipe(stagePipeSlots)
+	done := make(chan *staged, 1)
+	go func() { done <- b.stage(ctx, p, pw) }()
+
+	tee := b.observeConfirmWriter(d, p, size, a.Uncompressed().Size)
+	params, cerr := a.Confirm(ctx, tee)
+	// Confirm has written everything it will: end the stream for the stager
+	// (its error, so a failed confirm makes the stager's next read fail
+	// instead of reporting a clean end) and collect the stager.
+	p.CloseWrite(cerr)
+	s := <-done
+
+	if cerr != nil {
+		s.drop()
+		if s.err != nil {
+			b.log.Debug("staging discarded", "digest", d, "error", s.err)
+		}
+		switch {
+		case ctx.Err() != nil:
+			return prismResult{}, nil, store.Stats{}, ctx.Err()
+		case errors.Is(cerr, zrecipe.ErrNotReproducible):
+			return prismResult{}, nil, store.Stats{}, &rawFallback{reason: ReasonNotReproducible, err: cerr}
+		default:
+			return prismResult{}, nil, store.Stats{}, fmt.Errorf("blob: confirm: %w", cerr)
+		}
 	}
 	defer s.drop()
 	if err := s.check(params); err != nil {
 		if cerr := ctx.Err(); cerr != nil {
-			return prismResult{}, store.Stats{}, cerr
+			return prismResult{}, nil, store.Stats{}, cerr
 		}
 		var de *decomposeError
 		if errors.As(err, &de) {
-			b.log.Error("decompose failed, storing raw", "digest", d, "format", params.Format, "engine", params.Engine, "error", err)
-			return prismResult{}, store.Stats{}, &rawFallback{reason: ReasonDecomposeFailed, err: err}
+			if b.opts.AllowRaw {
+				b.log.Error("decompose failed, storing raw", "digest", d, "format", params.Format, "engine", params.Engine, "error", err)
+			}
+			return prismResult{}, nil, store.Stats{}, &rawFallback{reason: ReasonDecomposeFailed, err: err}
 		}
-		return prismResult{}, store.Stats{}, err
+		return prismResult{}, nil, store.Stats{}, err
 	}
 	b.observeStage(d, StageCommit)
 	w := b.st.NewWriter(ctx)
@@ -321,33 +365,35 @@ func (b *Store) finalizePrism(ctx context.Context, dec decision, d oci.Digest, s
 	if err != nil {
 		w.Abort()
 		if cerr := ctx.Err(); cerr != nil {
-			return prismResult{}, store.Stats{}, cerr
+			return prismResult{}, nil, store.Stats{}, cerr
 		}
-		return prismResult{}, store.Stats{}, err
+		return prismResult{}, nil, store.Stats{}, err
 	}
 	stats, err := w.Close()
 	if err != nil {
-		return prismResult{}, store.Stats{}, err
+		return prismResult{}, nil, store.Stats{}, err
 	}
 	if b.opts.VerifyRoundTrip {
 		b.observeStage(d, StageVerify)
 		// Read comp.json back from the store rather than reusing the
-		// in-memory params pass one produced: the check must exercise
-		// exactly the bytes a real pull will read (spec I5).
+		// in-memory params the confirming pass produced: the check must
+		// exercise exactly the bytes a real pull will read (spec I5).
 		storedParams, err := b.readCompParams(res.comp)
 		if err != nil {
-			return prismResult{}, store.Stats{}, fmt.Errorf("blob: reading back %s for round-trip check: %w", CompFile, err)
+			return prismResult{}, nil, store.Stats{}, fmt.Errorf("blob: reading back %s for round-trip check: %w", CompFile, err)
 		}
 		src := &Prism{st: b.st, recipe: res.recipe, index: res.index, blobs: res.blobs}
 		if err := roundTripCheck(ctx, b, src, storedParams, d); err != nil {
 			if cerr := ctx.Err(); cerr != nil {
-				return prismResult{}, store.Stats{}, cerr
+				return prismResult{}, nil, store.Stats{}, cerr
 			}
-			b.log.Error("round-trip verification failed, storing raw", "digest", d, "format", params.Format, "engine", params.Engine, "engine_version", params.EngineVersion, "error", err)
-			return prismResult{}, store.Stats{}, &rawFallback{reason: ReasonRoundTripFailed, err: err}
+			if b.opts.AllowRaw {
+				b.log.Error("round-trip verification failed, storing raw", "digest", d, "format", params.Format, "engine", params.Engine, "engine_version", params.EngineVersion, "error", err)
+			}
+			return prismResult{}, nil, store.Stats{}, &rawFallback{reason: ReasonRoundTripFailed, err: err}
 		}
 	}
-	return res, stats, nil
+	return res, params, stats, nil
 }
 
 // commit inserts the staged pack and comp.json through w. Progress is the

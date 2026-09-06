@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"iter"
 	"runtime"
@@ -36,7 +37,9 @@ type Stats struct {
 	// (compressed) payload size plus the record header.
 	DiskBytes int64 `json:"diskBytes"`
 	// ObjectsNew and ObjectsDeduped are packstore.WriteStats.Stored and
-	// Deduped.
+	// Deduped; ObjectsDeduped also counts the objects a pack Writer left
+	// out because the store already held them (see AddPack), so a blob's
+	// counts do not depend on when its duplicates were found.
 	ObjectsNew     int `json:"objectsNew"`
 	ObjectsDeduped int `json:"objectsDeduped"`
 }
@@ -67,10 +70,13 @@ const emitBuffer = 8
 
 // item is one object queued for the backend: a built object (Data) or a
 // record staged in a pack (Record), with the payload length the
-// accounting charges for it.
+// accounting charges for it. With skipped set it is a key alone, one a
+// pack Writer left out because the store held it: AddPack queues it for
+// the accounting and it never reaches the backend.
 type item struct {
 	obj     packstore.Object
 	logical int64
+	skipped bool
 }
 
 // Writer builds CAS objects and hands them to a backend. The live backend
@@ -95,10 +101,11 @@ type Writer struct {
 	closed bool
 
 	// Written only by the backend goroutines; read after done is closed.
-	logical int64
-	seen    map[key.Key]bool // live backend: every key offered -> Has reported it absent
-	wstats  packstore.WriteStats
-	werr    error
+	logical        int64
+	seen           map[key.Key]bool // live backend: every key offered -> Has reported it absent
+	skippedDeduped int              // live backend: skipped keys of added packs, found still present
+	wstats         packstore.WriteStats
+	werr           error
 
 	once   sync.Once
 	result Stats
@@ -146,7 +153,8 @@ func (w *Writer) run() {
 
 // objects is the accounting iterator: it forwards every object received on
 // ch to WriteParallel, summing encoded sizes and remembering which keys the
-// store did not have when they were first offered. A cancelled context
+// store did not have when they were first offered. A skipped key from an
+// added pack is accounted here and not forwarded. A cancelled context
 // stops the stream with the cancellation cause.
 func (w *Writer) objects() iter.Seq2[packstore.Object, error] {
 	return func(yield func(packstore.Object, error) bool) {
@@ -161,6 +169,13 @@ func (w *Writer) objects() iter.Seq2[packstore.Object, error] {
 						yield(packstore.Object{}, err)
 					}
 					return
+				}
+				if it.skipped {
+					if err := w.accountSkipped(it); err != nil {
+						yield(packstore.Object{}, err)
+						return
+					}
+					continue
 				}
 				if err := w.account(it); err != nil {
 					yield(packstore.Object{}, err)
@@ -186,6 +201,34 @@ func (w *Writer) account(it item) error {
 		return err
 	}
 	w.seen[it.obj.Key] = !has
+	return nil
+}
+
+// accountSkipped records one key a pack Writer left out because the store
+// held it when the pack was staged. The store is asked again, observe then
+// Has like the pack Writer and WriteParallel: the time between staging and
+// commit is longer than the live writer's between its own decision and the
+// publication, so the earlier answer is not trusted, and a key that has
+// disappeared fails the Writer rather than let the caller publish a root
+// that dangles. A present key counts as a deduplicated object with its
+// logical bytes and is remembered as present, so it never adds to
+// DiskBytes; a key this Writer stored itself earlier keeps its entry. Runs
+// on the iterator goroutine only, like account.
+func (w *Writer) accountSkipped(it item) error {
+	k := it.obj.Key
+	w.s.Objects.ObserveKeys([]key.Key{k})
+	has, err := w.s.Objects.Has(k)
+	if err != nil {
+		return err
+	}
+	if !has {
+		return fmt.Errorf("store: staged chunk %s is no longer in the store", k)
+	}
+	w.logical += it.logical
+	if _, seen := w.seen[k]; !seen {
+		w.seen[k] = false
+	}
+	w.skippedDeduped++
 	return nil
 }
 
@@ -339,7 +382,7 @@ func (w *Writer) finish() (Stats, error) {
 		NewLogicalBytes: w.wstats.BytesStored,
 		DedupedBytes:    w.logical - w.wstats.BytesStored,
 		ObjectsNew:      w.wstats.Stored,
-		ObjectsDeduped:  w.wstats.Deduped,
+		ObjectsDeduped:  w.wstats.Deduped + w.skippedDeduped,
 	}
 	for k, absent := range w.seen {
 		if !absent {

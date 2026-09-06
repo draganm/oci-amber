@@ -402,7 +402,7 @@ func TestPrismRootLayout(t *testing.T) {
 }
 
 func TestPutZstdTarRoundTrips(t *testing.T) {
-	b, _, _ := newTestStore(t, Options{VerifyRoundTrip: true})
+	b, _, _ := newTestStore(t, Options{VerifyRoundTrip: true, AllowRaw: true})
 	files := prismFixtureFiles(t)
 	tarData := prismTar(t, files)
 	data := prismZstd(t, tarData)
@@ -456,7 +456,7 @@ func zstdHugeWindowFrame() []byte {
 // so a hostile or oversized frame never grows a decoder window buffer past
 // the configured bound.
 func TestPutZstdHugeWindowStoresRawUnsupported(t *testing.T) {
-	b, _, logs := newTestStore(t, Options{VerifyRoundTrip: true})
+	b, _, logs := newTestStore(t, Options{VerifyRoundTrip: true, AllowRaw: true})
 	data := zstdHugeWindowFrame()
 	meta := putPrism(t, b, data)
 	if meta.Kind != KindRaw || meta.RawReason != ReasonUnsupported {

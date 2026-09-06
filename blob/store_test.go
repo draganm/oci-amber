@@ -87,8 +87,8 @@ func TestNewAppliesDefaults(t *testing.T) {
 	if b.opts != want {
 		t.Fatalf("defaults = %+v, want %+v", b.opts, want)
 	}
-	b2, _, _ := newTestStore(t, Options{MaxConcurrentFinalize: 3, AnalyzeParallelism: 1, AnalyzeTimeout: time.Second, RecentTTL: time.Minute, MaxInMemory: 1 << 20, VerifyRoundTrip: true})
-	if b2.opts.MaxConcurrentFinalize != 3 || b2.opts.AnalyzeParallelism != 1 || b2.opts.AnalyzeTimeout != time.Second || b2.opts.RecentTTL != time.Minute || b2.opts.MaxInMemory != 1<<20 || !b2.opts.VerifyRoundTrip {
+	b2, _, _ := newTestStore(t, Options{MaxConcurrentFinalize: 3, AnalyzeParallelism: 1, AnalyzeTimeout: time.Second, RecentTTL: time.Minute, MaxInMemory: 1 << 20, VerifyRoundTrip: true, AllowRaw: true})
+	if b2.opts.MaxConcurrentFinalize != 3 || b2.opts.AnalyzeParallelism != 1 || b2.opts.AnalyzeTimeout != time.Second || b2.opts.RecentTTL != time.Minute || b2.opts.MaxInMemory != 1<<20 || !b2.opts.VerifyRoundTrip || !b2.opts.AllowRaw {
 		t.Fatalf("explicit options overridden: %+v", b2.opts)
 	}
 }

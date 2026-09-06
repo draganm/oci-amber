@@ -275,21 +275,18 @@ the upload proceeds and step 2 catches it.
 3. **Finalize slot.** Acquire one of `--max-concurrent-finalize` slots
    (default `max(1, NumCPU/2)`). This bounds engine-search CPU and spool
    memory.
-4. **Pass one: analyze and stage.** After the pre-checks (the zstd window
-   bound, the compressed tar-header probe, and the uncompressed
-   tar-header probe for streams `Detect` reports as `none`; each decides
-   raw `not-tar` or `unsupported` without staging anything),
-   `zrecipe.Analyze(ctx, spool, &Options{TempDir: <work-dir>/oci-amber/spool,
+4. **Analyze.** After the pre-checks (the zstd window bound, the
+   compressed tar-header probe, and the uncompressed tar-header probe for
+   streams `Detect` reports as `none`; each decides raw `not-tar` or
+   `unsupported` without touching anything else),
+   `zrecipe.Start(ctx, spool, &Options{TempDir: <work-dir>/oci-amber/spool,
    MaxInMemory: --max-in-memory, Parallelism: --analyze-parallelism
-   (default 2), Uncompressed: pipe})` runs under a child context with
-   `--analyze-timeout` (default 15 min). The pipe carries the decompressed
-   stream to a goroutine that hashes it (BLAKE3, sha256, length) and runs
-   `tarprism.DecomposeTo` with the amber sink over a pack-backed
-   `store.Writer`: the recipe, the index and every file content are built
-   exactly as for the store and encoded as records into an unlinked temp
-   pack under `<work-dir>/oci-amber/spool`. The stager always reads the
-   pipe to its end, so it never blocks or fails `Analyze`. See
-   `2026-09-05-speculative-decompose-design.md`.
+   (default 2)})` runs under a child context with `--analyze-timeout`
+   (default 15 min): it decompresses the stream once into zrecipe's spool
+   and eliminates the deflate/zstd candidates down to the one that
+   reproduces the input. Nothing is staged here, so a layer that turns out
+   not reproducible never touches a pack. See
+   `2026-09-06-single-pass-confirm-design.md`.
 5. **Classify.**
    - `Params.Format` gzip, zstd or none with staging succeeded: prism
      candidate. The staged stream's BLAKE3 and length must equal
@@ -305,20 +302,30 @@ the upload proceeds and step 2 catches it.
    - Any other error, including the request context being cancelled: the
      upload fails with `500`, the session is put back so the client may
      retry the PUT, and nothing is stored.
-6. **Commit** (prism candidates). One accounting writer inserts the pack's
-   records into the store (`AddPack`: dedup against the store and within
-   the pack, verification, the GC barrier, exactly as freshly built
-   objects get) and stores comp.json; its stats become the blob's. The
-   sha256 of the staged stream becomes `diffId`. A store failure abandons
-   the objects written so far to GC and fails the upload.
+6. **Confirm and commit** (prism candidates). `zrecipe.Analysis.Confirm`
+   reads the decompressed content once and rebuilds the input from it
+   through the same code the pull path runs, comparing byte for byte, so
+   the layer is recompressed once and the parameters are verified by
+   construction; a mismatch is `not-reproducible`. As Confirm streams the
+   content it tees it to a goroutine that hashes it (BLAKE3, sha256,
+   length) and runs `tarprism.DecomposeTo` with the amber sink over a
+   pack-backed `store.Writer`, encoding the records the store lacks into an
+   unlinked temp pack (present chunks are skipped and accounted at commit).
+   The staged stream's BLAKE3 and length must equal `params.Uncompressed`,
+   else raw `decompose-failed`. One accounting writer then inserts the
+   pack's records (`AddPack`: dedup, verification, the GC barrier, exactly
+   as freshly built objects get) and stores comp.json; its stats become the
+   blob's. The sha256 of the staged stream becomes `diffId`. A store
+   failure abandons the objects written so far to GC and fails the upload.
 7. **Raw path.** `store.PutStream(spool)` through the accounting iterator.
    The spool is the verbatim bytes, whatever their format.
-8. **Round-trip verification** (`--verify-roundtrip`, default on, prisms
+8. **Round-trip verification** (`--verify-roundtrip`, default off, prisms
    only). Run the full pull pipeline from the freshly built objects into a
    sha256 and compare with the OCI digest. Failure logs at error level and
-   downgrades the blob to raw with reason `roundtrip-failed`. This makes a
-   pull-time failure possible only through compressor drift after an
-   upgrade, never through an ingest bug.
+   downgrades the blob to raw with reason `roundtrip-failed` (or refuses it,
+   see step 5). The confirming pass in step 6 already verifies the
+   recompression by construction, so this only adds the store read-back and
+   the tar-prism compose; it is an opt-in diagnostic.
 9. **Root and publish.** Build `meta.json` and the blob root through a second,
    small accounting writer whose stats are not counted, publish
    `oci/blob/<digest>`, record the stats in the recent-uploads table,
@@ -551,7 +558,8 @@ variables through urfave/cli):
 | `--analyze-parallelism` | `2` | zrecipe candidate workers per blob |
 | `--analyze-timeout` | `15m` | per-blob analyze deadline before raw fallback |
 | `--max-concurrent-finalize` | `NumCPU/2` (min 1) | concurrent blob finalizations |
-| `--verify-roundtrip` | `true` | pull-pipeline check before publishing a prism |
+| `--verify-roundtrip` | `false` | opt-in diagnostic: pull-pipeline check before publishing a prism (the confirming pass already verifies the recompression) |
+| `--allow-raw` | `false` | store a layer raw when it cannot be a prism instead of refusing the upload; non-tar blobs are always stored raw |
 | `--upload-timeout` | `1h` | idle upload session expiry and recent-uploads table TTL |
 | `--gc-interval` | `0` | background GC cycle interval, 0 disables |
 | `--log-level` | `info` | slog level |

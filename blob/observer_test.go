@@ -72,7 +72,7 @@ func TestObserverPrismStages(t *testing.T) {
 	if meta.Kind != KindPrism {
 		t.Fatalf("kind = %s (%s), want prism", meta.Kind, meta.RawReason)
 	}
-	rec.assertStages(t, int64(len(data)), []Stage{StageAnalyze, StageCommit, StageVerify}, StageAnalyze, StageCommit, StageVerify)
+	rec.assertStages(t, int64(len(data)), []Stage{StageAnalyze, StageConfirm, StageCommit, StageVerify}, StageAnalyze, StageConfirm, StageCommit, StageVerify)
 }
 
 func TestObserverPrismWithoutVerify(t *testing.T) {
@@ -80,7 +80,7 @@ func TestObserverPrismWithoutVerify(t *testing.T) {
 	b, _, _ := newTestStore(t, Options{VerifyRoundTrip: false, Observer: rec})
 	data := gzipBytes(t, tarBytes(t, "etc/motd", textBytes(64<<10, 1)), gzip.DefaultCompression)
 	putPrism(t, b, data)
-	rec.assertStages(t, int64(len(data)), []Stage{StageAnalyze, StageCommit}, StageAnalyze, StageCommit)
+	rec.assertStages(t, int64(len(data)), []Stage{StageAnalyze, StageConfirm, StageCommit}, StageAnalyze, StageConfirm, StageCommit)
 }
 
 func TestObserverRawStages(t *testing.T) {
@@ -99,14 +99,14 @@ func TestObserverRawStages(t *testing.T) {
 
 func TestObserverStagingDowngrade(t *testing.T) {
 	rec := &recorder{}
-	b, _, _ := newTestStore(t, Options{VerifyRoundTrip: true, Observer: rec})
+	b, _, _ := newTestStore(t, Options{VerifyRoundTrip: true, AllowRaw: true, Observer: rec})
 	full := tarBytes(t, "usr/lib/app", textBytes(8<<10, 3))
 	data := gzipBytes(t, full[:tarHeaderSize+1024], gzip.DefaultCompression)
 	meta := putPrism(t, b, data)
 	if meta.Kind != KindRaw || meta.RawReason != ReasonDecomposeFailed {
 		t.Fatalf("kind/reason = %s/%s, want raw/decompose-failed", meta.Kind, meta.RawReason)
 	}
-	rec.assertStages(t, int64(len(data)), []Stage{StageAnalyze, StageRaw}, StageAnalyze, StageRaw)
+	rec.assertStages(t, int64(len(data)), []Stage{StageAnalyze, StageConfirm, StageRaw}, StageAnalyze, StageConfirm, StageRaw)
 }
 
 func TestObserverDedupHitReportsNothing(t *testing.T) {
