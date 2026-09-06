@@ -283,9 +283,12 @@ finalize slots).
    import before anything is written. Progress is bytes read over the
    total of non-present blob sizes; this is disk-speed I/O, seconds for
    a multi-gigabyte archive.
-2. **Blobs.** A pool of `Workers` goroutines takes non-present blobs in
-   plan order and calls `blobs.Put` with a section spool. The first
-   failure cancels the run and is returned. A blob that `Put` downgrades
+2. **Blobs.** A pool of `Workers` goroutines takes non-present blobs
+   largest first (plan order among equals) and calls `blobs.Put` with a
+   section spool; a blob's time is a single-threaded recompression
+   proportional to its size, so the largest must not start last and run
+   alone after the small ones. The first failure cancels the run and is
+   returned. A blob that `Put` downgrades
    to raw is not a failure.
 3. **Manifests.** Sequentially, children before parents, `images.Put` with
    the body and media type. Child manifests are published by digest
